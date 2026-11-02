@@ -114,7 +114,7 @@ async def _process_single(message: Message, url: str, status: Message) -> None:
 # ============================================================
 
 async def _send_playlist_track(message: Message, i: int, total: int, track) -> bool:
-    """Скачивает один трек из плейлиста с fallback на SoundCloud."""
+    """Скачивает один трек. True если отправлен."""
     key_url = track.url or f"search:{track.artist} {track.name}"
     h = url_hash(key_url)
     cached = await get_cached(h)
@@ -132,10 +132,10 @@ async def _send_playlist_track(message: Message, i: int, total: int, track) -> b
 
     meta = TrackMeta(title=track.name, artist=track.artist, duration=track.duration)
 
-    # Попытка 1: YouTube (ytsearch5)
+    # Попытка 1: YouTube
     try:
         q = f"ytsearch5:{meta.artist} {meta.title}" if meta.artist else f"ytsearch5:{meta.title}"
-        result = await asyncio.to_thread(_sync_search_dl, q, meta, "mp3_320", True)
+        result = await asyncio.to_thread(_sync_search_dl, q, meta, "mp3_320", True, True)
         audio = FSInputFile(str(result.filepath), filename=result.filepath.name)
         file_id = await _send_audio_safe(
             message,
@@ -145,16 +145,17 @@ async def _send_playlist_track(message: Message, i: int, total: int, track) -> b
             duration=result.duration or None,
         )
         if file_id:
-            await save_cached(h, key_url, "playlist", result.title, result.performer, result.duration, file_id)
+            await save_cached(h, key_url, "playlist_yt", result.title, result.performer, result.duration, file_id)
         cleanup(result.filepath)
         return True
     except Exception as e1:
-        logger.warning("YT failed for %s - %s: %s", meta.artist, meta.title, e1)
+        logger.info("YT failed [%s - %s], trying SoundCloud: %s",
+                    meta.artist, meta.title, str(e1)[:80])
 
-    # Попытка 2: SoundCloud (ytsearch через scsearch)
+    # Попытка 2: SoundCloud
     try:
         q = f"scsearch3:{meta.artist} {meta.title}" if meta.artist else f"scsearch3:{meta.title}"
-        result = await asyncio.to_thread(_sync_search_dl, q, meta, "mp3_320", False)
+        result = await asyncio.to_thread(_sync_search_dl, q, meta, "mp3_320", False, True)
         audio = FSInputFile(str(result.filepath), filename=result.filepath.name)
         file_id = await _send_audio_safe(
             message,
@@ -166,33 +167,58 @@ async def _send_playlist_track(message: Message, i: int, total: int, track) -> b
         if file_id:
             await save_cached(h, key_url, "playlist_sc", result.title, result.performer, result.duration, file_id)
         cleanup(result.filepath)
+        logger.info("SC success: %s - %s", meta.artist, meta.title)
         return True
     except Exception as e2:
-        logger.exception("SC also failed for %s", track.name)
+        logger.warning("SC also failed [%s]: %s", track.name, str(e2)[:80])
         try:
             await message.answer(
                 f"❌ {i}. {html.escape(str(track.artist or ''))} — {html.escape(str(track.name))}\n"
-                f"<i>Не удалось скачать ни с YouTube, ни с SoundCloud</i>"
+                f"<i>Не нашёл ни на YouTube, ни на SoundCloud</i>"
             )
         except Exception:
             pass
         return False
 
 
-async def _process_parsed_playlist(message: Message, playlist, status: Message) -> None:
+
+async def _process_parsed_playlist(message: Message, playlist, status: Message, concurrency: int = 2) -> None:
+    """Параллельное скачивание по 2-3 трека."""
     if not playlist or not getattr(playlist, "tracks", None):
         raise RuntimeError("Пустой плейлист")
     total = len(playlist.tracks)
-    sent = 0
-    for i, track in enumerate(playlist.tracks, 1):
-        try:
-            await status.edit_text(
-                f"📋 <b>{html.escape(playlist.title)}</b>\n"
-                f"Скачиваю {i}/{total}\n"
-                f"<i>{html.escape(track.artist)} — {html.escape(track.name)}</i>"
-            )
-        except Exception:
-            pass
+    sem = asyncio.Semaphore(concurrency)
+    counter = {"sent": 0, "done": 0}
+    lock = asyncio.Lock()
+
+    async def worker(i: int, track):
+        async with sem:
+            ok = await _send_playlist_track(message, i, total, track)
+            async with lock:
+                counter["done"] += 1
+                if ok:
+                    counter["sent"] += 1
+                try:
+                    await status.edit_text(
+                        f"📋 <b>{html.escape(playlist.title)}</b>\n"
+                        f"Готово: {counter['done']}/{total} (✅ {counter['sent']})\n"
+                        f"<i>Параллельно: {concurrency}</i>"
+                    )
+                except Exception:
+                    pass
+            return ok
+
+    tasks = [worker(i, t) for i, t in enumerate(playlist.tracks, 1)]
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    try:
+        await status.edit_text(
+            f"✅ <b>{html.escape(playlist.title)}</b>\n"
+            f"Готово: {counter['sent']}/{total}"
+        )
+    except Exception:
+        pass
+
         if await _send_playlist_track(message, i, total, track):
             sent += 1
     try:

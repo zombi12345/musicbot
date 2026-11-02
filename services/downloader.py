@@ -331,7 +331,8 @@ async def _yandex_meta(url):
 # yt-dlp
 # ============================================================
 
-def _ydl_opts(fmt):
+def _ydl_opts(fmt, fast: bool = False):
+    """fast=True — для плейлистов: быстрее падать, меньше retries."""
     opts = {
         "format": "bestaudio/best",
         "noplaylist": True,
@@ -339,23 +340,28 @@ def _ydl_opts(fmt):
         "no_warnings": True,
         "no_color": True,
         "color": "no_color",
-        # Retries для нестабильных серверов Google
-        "retries": 5,
-        "fragment_retries": 5,
-        "socket_timeout": 30,
-        "file_access_retries": 3,
-        "extractor_retries": 3,
-        # HTTP заголовки — уменьшают 403
+        "retries": 2 if fast else 4,
+        "fragment_retries": 2 if fast else 4,
+        "socket_timeout": 15 if fast else 25,
+        "file_access_retries": 2,
+        "extractor_retries": 2 if fast else 3,
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
         },
-        # Пропускаем треки с geo-block
         "geo_bypass": True,
+        # Пробуем разные клиенты YouTube — уменьшает ConnectionResetError
+        "extractor_args": {
+            "youtube": {"player_client": ["web", "android", "ios"]},
+        },
     }
     if FFMPEG_LOCATION:
         opts["ffmpeg_location"] = FFMPEG_LOCATION
-    opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "320" if fmt == "mp3_320" else "192"}]
+    opts["postprocessors"] = [{
+        "key": "FFmpegExtractAudio",
+        "preferredcodec": "mp3",
+        "preferredquality": "320" if fmt == "mp3_320" else "192",
+    }]
     return opts
 
 
@@ -388,7 +394,7 @@ def _score(entry, meta):
     return s
 
 
-def _sync_search_dl(query, meta, fmt, strict):
+def _sync_search_dl(query, meta, fmt, strict, fast: bool = False):
     with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}) as ydl:
         info = ydl.extract_info(query, download=False)
     if not info or "entries" not in info:
@@ -416,7 +422,7 @@ def _sync_search_dl(query, meta, fmt, strict):
         raise RuntimeError("Не нашёл URL")
     logger.info("Picked: %s | score=%d", best.get("title"), best_score)
 
-    opts = _ydl_opts(fmt)
+    opts = _ydl_opts(fmt, fast=fast)
     opts["outtmpl"] = str(DOWNLOAD_DIR / "%(title).80s.%(ext)s")
     with yt_dlp.YoutubeDL(opts) as ydl:
         dl = ydl.extract_info(best_url, download=True)
@@ -439,7 +445,7 @@ def _sync_search_dl(query, meta, fmt, strict):
 
 
 def _sync_direct(url, fmt):
-    opts = _ydl_opts(fmt)
+    opts = _ydl_opts(fmt, fast=fast)
     opts["outtmpl"] = str(DOWNLOAD_DIR / "%(title).80s.%(ext)s")
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)

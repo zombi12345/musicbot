@@ -430,33 +430,68 @@ def _score(entry, meta):
 
 
 def _sync_search_dl(query, meta, fmt, strict, fast: bool = False):
-    with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}) as ydl:
-        info = ydl.extract_info(query, download=False)
+    """Сначала SoundCloud, потом YouTube (обход блокировки Render IP)."""
+    # Извлекаем "искомое" из query (ytsearch5:ARTIST TITLE)
+    raw_query = query
+    for prefix in ("ytsearch5:", "scsearch5:", "scsearch3:", "ytsearch3:", "ytsearch1:"):
+        if raw_query.startswith(prefix):
+            raw_query = raw_query[len(prefix):]
+            break
+
+    # ==== Попытка 1: SoundCloud ====
+    try:
+        sc_query = f"scsearch5:{raw_query}"
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "no_color": True, "skip_download": True}) as ydl:
+            info = ydl.extract_info(sc_query, download=False)
+        if info and "entries" in info:
+            entries = [e for e in info["entries"] if e]
+            if entries:
+                scored = [(e, _score(e, meta)) for e in entries]
+                scored.sort(key=lambda x: x[1], reverse=True)
+                best, best_score = scored[0]
+                logger.info("SC top: %s (score=%d)", [(e.get("title","?")[:40], s) for e, s in scored[:3]], best_score)
+                if best_score >= 3:
+                    best_url = best.get("webpage_url") or best.get("url")
+                    logger.info("SC picked: %s | score=%d", best.get("title"), best_score)
+                    opts = _ydl_opts(fmt, fast=fast)
+                    opts["outtmpl"] = str(DOWNLOAD_DIR / "%(title).80s.%(ext)s")
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        dl = ydl.extract_info(best_url, download=True)
+                        if "entries" in dl:
+                            dl = dl["entries"][0]
+                        fp = Path(ydl.prepare_filename(dl)).with_suffix(".mp3")
+                    final_title = meta.title or dl.get("title") or "Unknown"
+                    final_artist = meta.artist or dl.get("uploader") or "Unknown"
+                    try:
+                        a = MP3(str(fp))
+                        if a.tags is None:
+                            a.add_tags()
+                        a.tags.add(TIT2(encoding=3, text=final_title))
+                        a.tags.add(TPE1(encoding=3, text=final_artist))
+                        a.save()
+                    except Exception:
+                        pass
+                    return DownloadResult(filepath=fp, title=final_title, performer=final_artist, duration=int(dl.get("duration") or 0))
+    except Exception as e:
+        logger.info("SC failed, trying YouTube: %s", str(e)[:100])
+
+    # ==== Попытка 2: YouTube ====
+    yt_query = f"ytsearch5:{raw_query}"
+    with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "no_color": True, "skip_download": True}) as ydl:
+        info = ydl.extract_info(yt_query, download=False)
     if not info or "entries" not in info:
         raise RuntimeError("Поиск не дал результатов")
     entries = [e for e in info["entries"] if e]
     if not entries:
         raise RuntimeError("Поиск пустой")
-
     scored = [(e, _score(e, meta)) for e in entries]
     scored.sort(key=lambda x: x[1], reverse=True)
     best, best_score = scored[0]
-    top3 = [(e.get("title", "?")[:60], s) for e, s in scored[:3]]
-    logger.info("Top results: %s", top3)
-
+    logger.info("YT top: %s (score=%d)", [(e.get("title","?")[:40], s) for e, s in scored[:3]], best_score)
     if strict and best_score < MIN_MATCH_SCORE:
-        raise RuntimeError(
-            "Точного совпадения нет. Возможно:\n"
-            "• трек есть только на SoundCloud\n"
-            "• это редкий ремикс, которого нет на YouTube\n\n"
-            "Пришли ссылку на SoundCloud или YouTube."
-        )
-
+        raise RuntimeError(f"Нет точного совпадения (score {best_score})")
     best_url = best.get("webpage_url") or best.get("url")
-    if not best_url:
-        raise RuntimeError("Не нашёл URL")
-    logger.info("Picked: %s | score=%d", best.get("title"), best_score)
-
+    logger.info("YT picked: %s | score=%d", best.get("title"), best_score)
     opts = _ydl_opts(fmt, fast=fast)
     opts["outtmpl"] = str(DOWNLOAD_DIR / "%(title).80s.%(ext)s")
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -464,7 +499,6 @@ def _sync_search_dl(query, meta, fmt, strict, fast: bool = False):
         if "entries" in dl:
             dl = dl["entries"][0]
         fp = Path(ydl.prepare_filename(dl)).with_suffix(".mp3")
-
     final_title = meta.title or dl.get("title") or "Unknown"
     final_artist = meta.artist or dl.get("uploader") or "Unknown"
     try:
@@ -474,8 +508,8 @@ def _sync_search_dl(query, meta, fmt, strict, fast: bool = False):
         a.tags.add(TIT2(encoding=3, text=final_title))
         a.tags.add(TPE1(encoding=3, text=final_artist))
         a.save()
-    except Exception as e:
-        logger.warning("Tags failed: %s", e)
+    except Exception:
+        pass
     return DownloadResult(filepath=fp, title=final_title, performer=final_artist, duration=int(dl.get("duration") or 0))
 
 

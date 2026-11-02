@@ -1,9 +1,10 @@
 STRINGS = {
-    "start_hello": "Привет, {name}! 👋\n\nЯ скачиваю музыку из Spotify, SoundCloud и Яндекс.Музыки.\n\nПока в разработке — скоро запуск! 🚀",
+    "start_hello": "Привет, {name}! 👋\n\nЯ скачиваю музыку из Spotify, SoundCloud и Яндекс.Музыки.\n\nПросто пришли мне ссылку на трек — и я отправлю файл. 🎵",
     "menu_title": "🏠 Главное меню",
     "menu_download": "🎵 Скачать трек",
     "menu_profile": "📊 Мой профиль",
     "menu_help": "❓ Помощь",
+    "download_hint": "🔗 Пришли ссылку на трек:\n• Spotify\n• SoundCloud\n• Яндекс.Музыка\n• YouTube",
     "admin_title": "🛠 Админ-панель",
     "admin_no_access": "⛔ Нет доступа.",
     "stats_title": "📊 Статистика",
@@ -11,4 +12,5 @@ STRINGS = {
     "stats_active": "🟢 Активных (7 дней)",
     "stats_banned": "🚫 Забанено",
     "banned_alert": "⛔ Вы заблокированы.",
+    "help_text": "📖 Как пользоваться:\n\n1. Пришли ссылку из Spotify, SoundCloud, Яндекс.Музыки или YouTube\n2. Дождись загрузки\n3. Получи mp3 320 kbps",
 }

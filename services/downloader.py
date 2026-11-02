@@ -424,8 +424,14 @@ def _score(entry, meta):
         s += 1
     if "audio" in t:
         s += 1
-    if meta.duration and d and abs(d - meta.duration) <= 5:
-        s += 4
+    if meta.duration and d:
+        diff = abs(d - meta.duration)
+        if diff <= 5:
+            s += 10       # почти точное совпадение — огромный бонус
+        elif diff <= 15:
+            s += 4
+        elif diff > 60:
+            s -= 5        # слишком далеко — штраф
     return s
 
 
@@ -444,7 +450,7 @@ def _sync_search_dl(query, meta, fmt, strict, fast: bool = False):
         with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "no_color": True, "skip_download": True}) as ydl:
             info = ydl.extract_info(sc_query, download=False)
         if info and "entries" in info:
-            entries = [e for e in info["entries"] if e]
+            entries = [e for e in info["entries"] if e and (e.get("duration") or 0) >= 60]
             if entries:
                 scored = [(e, _score(e, meta)) for e in entries]
                 scored.sort(key=lambda x: x[1], reverse=True)

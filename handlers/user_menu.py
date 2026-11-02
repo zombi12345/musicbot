@@ -16,7 +16,7 @@ from keyboards.main import (
     sub_inline,
     tracks_inline,
 )
-from utils.checks import is_banned
+from utils.checks import is_banned, is_admin
 
 router = Router(name="user_menu")
 async def _price_lines(uid: int) -> str:
@@ -862,4 +862,10 @@ async def cb_user_cancel(call: CallbackQuery, state: FSMContext) -> None:
         await call.message.edit_text("❌ Отменено.")
     except Exception:
         pass
+    # Восстанавливаем reply keyboard
+    admin = await is_admin(call.from_user.id)
+    await call.message.answer(
+        "🏠 <b>Главное меню</b> — кнопки внизу",
+        reply_markup=main_menu(is_admin=admin),
+    )
     await call.answer()

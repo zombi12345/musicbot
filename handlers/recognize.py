@@ -8,11 +8,11 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, FSInputFile, Message
 
 from database import postgres_db as db
-from keyboards.main import recognize_kb
+from keyboards.main import main_menu, recognize_kb
 from services.downloader import _sync_search_dl, TrackMeta, cleanup
 from services.recognize import recognize_file
 from states import RecognizeStates
-from utils.checks import is_banned
+from utils.checks import is_admin, is_banned
 
 router = Router(name="recognize")
 logger = logging.getLogger(__name__)
@@ -51,6 +51,11 @@ async def cb_recognize_cancel(call: CallbackQuery, state: FSMContext) -> None:
         await call.message.edit_text("❌ Распознавание отменено.")
     except Exception:
         pass
+    admin = await is_admin(call.from_user.id)
+    await call.message.answer(
+        "🏠 <b>Главное меню</b> — кнопки внизу",
+        reply_markup=main_menu(is_admin=admin),
+    )
     await call.answer()
 
 

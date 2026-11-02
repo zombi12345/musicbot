@@ -62,7 +62,7 @@ async def recognize_file(audio_path: Path) -> dict | None:
     used_wav = False
     shazam = None
     try:
-        ok = await asyncio.to_thread(_convert_to_wav, audio_path, wav_path)
+        logger.info("recognize: in=%s size=%d", audio_path.name, audio_path.stat().st_size if audio_path.exists() else 0)`n        ok = await asyncio.to_thread(_convert_to_wav, audio_path, wav_path)
         used_wav = ok
         if not ok:
             logger.warning("WAV conversion failed, trying original file")
@@ -82,7 +82,7 @@ async def recognize_file(audio_path: Path) -> dict | None:
             except Exception as e:
                 logger.debug("shazam close failed: %s", e)
     except Exception:
-        logger.exception("shazam recognize failed")
+        logger.exception("shazam recognize failed"); import traceback; traceback.print_exc()
         return None
     finally:
         if used_wav and wav_path.exists():

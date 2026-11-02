@@ -7,7 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
 from database import postgres_db as db
-from keyboards.main import main_menu
+from keyboards.main import cancel_kb, main_menu
 from utils.checks import is_admin, is_banned
 
 router = Router(name="start")
@@ -96,10 +96,11 @@ async def btn_download_hint(message: Message) -> None:
         "💡 Просто скопируй ссылку из «Поделиться» и вставь в чат.\n"
         "Плейлисты тоже работают — до 20 треков."
     )
-    await message.answer(text)
+    await message.answer(text, reply_markup=cancel_kb())
 
 
-@router.message(F.text == "🎤 Распознать")
+# btn_recognize_hint удалён — работает в recognize.py
+@router.message(F.text == "🎤 Распознать_DEAD")
 async def btn_recognize_hint(message: Message) -> None:
     text = (
         "🎤 <b>Распознать музыку</b>\n\n"

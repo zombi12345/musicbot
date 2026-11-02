@@ -9,6 +9,7 @@ from pathlib import Path
 
 import httpx
 import yt_dlp
+from SpotiFLAC import AsyncSpotiFLAC
 from dotenv import load_dotenv
 from mutagen.id3 import ID3, TIT2, TPE1
 from mutagen.mp3 import MP3

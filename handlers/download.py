@@ -316,7 +316,12 @@ async def handle_url(message: Message) -> None:
                 if platform == Platform.SPOTIFY:
                     await _process_spotify_playlist(message, url, status)
                 elif platform == Platform.YANDEX:
-                    await _process_yandex_playlist(message, url, status)
+                    # Сначала yt-dlp (умеет YandexMusic extractor), fallback на HTML
+                    try:
+                        await _process_ytdlp_playlist(message, url, status)
+                    except Exception as e:
+                        logger.warning("yandex yt-dlp failed: %s, fallback HTML", e)
+                        await _process_yandex_playlist(message, url, status)
                 else:
                     await _process_ytdlp_playlist(message, url, status)
             else:

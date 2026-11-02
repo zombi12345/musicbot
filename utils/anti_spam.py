@@ -1,17 +1,16 @@
-"""Anti-spam middleware: 0.5s между апдейтами от юзера."""
+"""Anti-spam middleware."""
 import logging
 import time
 
 from aiogram import BaseMiddleware
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery
 
 logger = logging.getLogger(__name__)
 
 
 class AntiSpamMiddleware(BaseMiddleware):
-    def __init__(self, interval: float = 0.5, alert: bool = False):
+    def __init__(self, interval: float = 1.0):
         self.interval = interval
-        self.alert = alert
         self.last: dict = {}
 
     async def __call__(self, handler, event, data):
@@ -21,10 +20,9 @@ class AntiSpamMiddleware(BaseMiddleware):
         now = time.time()
         last = self.last.get(user.id, 0)
         if now - last < self.interval:
-            logger.debug("antispam drop: user=%s type=%s", user.id, type(event).__name__)
-            if self.alert and isinstance(event, CallbackQuery):
+            if isinstance(event, CallbackQuery):
                 try:
-                    await event.answer("⏳ Не так быстро", show_alert=False)
+                    await event.answer()
                 except Exception:
                     pass
             return None

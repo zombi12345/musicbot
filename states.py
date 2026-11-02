@@ -31,6 +31,7 @@ class DownloadStates(StatesGroup):
     downloading = State()
 
 class AdminBillingStates(StatesGroup):
+    bcast_filter_text = State()
     withdraw_amount = State()
     withdraw_note = State()
     bill_free_count = State()

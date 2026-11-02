@@ -1,4 +1,4 @@
-"""Скачивание аудио: SoundCloud/YouTube напрямую, Spotify/Yandex через метаданные + ytsearch5."""
+"""Скачивание: SoundCloud/YouTube напрямую, Spotify/Yandex через metadata + ytsearch5."""
 import asyncio
 import json
 import logging
@@ -25,6 +25,7 @@ FFMPEG_LOCATION = os.getenv("FFMPEG_LOCATION", "").strip() or None
 SPOTIFY_OEMBED = "https://open.spotify.com/oembed"
 SPOTIFY_EMBED = "https://open.spotify.com/embed/track/{id}"
 ITUNES_SEARCH = "https://itunes.apple.com/search"
+DEEZER_SEARCH = "https://api.deezer.com/search"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 MIN_MATCH_SCORE = 4
 
@@ -44,6 +45,36 @@ class DownloadResult:
     performer: str
     duration: int = 0
     platform: str = "unknown"
+
+
+# ============================================================
+# Parsers
+# ============================================================
+
+def _parse_next_data(html_text):
+    """Spotify __NEXT_DATA__ - самый надёжный источник artist/title/duration."""
+    m = re.search(r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>', html_text, re.DOTALL)
+    if not m:
+        return TrackMeta()
+    try:
+        data = json.loads(m.group(1))
+    except Exception:
+        return TrackMeta()
+    try:
+        entity = data["props"]["pageProps"]["state"]["data"]["entity"]
+    except (KeyError, TypeError):
+        return TrackMeta()
+    meta = TrackMeta(source="spotify_next")
+    meta.title = (entity.get("name") or "").strip()
+    artists = entity.get("artists") or []
+    if isinstance(artists, list):
+        meta.artist = ", ".join(a.get("name", "") for a in artists if isinstance(a, dict) and a.get("name"))
+    elif isinstance(entity.get("subtitle"), str):
+        meta.artist = entity["subtitle"].strip()
+    dur = entity.get("duration") or 0
+    if dur:
+        meta.duration = int(dur) // 1000
+    return meta
 
 
 def _parse_json_ld(html_text):
@@ -92,7 +123,7 @@ def _parse_og(html_text):
         for sep in [" · ", " — ", " – ", " - "]:
             if sep in desc:
                 head = desc.split(sep, 1)[0].strip()
-                if head and len(head) < 100:
+                if head and len(head) < 100 and not head.lower().startswith("listen to"):
                     meta.artist = head
                 break
     if meta.title:
@@ -101,85 +132,76 @@ def _parse_og(html_text):
     return meta
 
 
-async def _fetch_page_meta(url):
+async def _fetch_html(url):
     try:
         async with httpx.AsyncClient(timeout=20, headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9,ru;q=0.8"}, follow_redirects=True) as c:
             r = await c.get(url)
             if r.status_code != 200:
-                return TrackMeta()
-            html_text = r.text
+                return ""
+            return r.text
     except Exception as e:
-        logger.warning("Page fetch failed: %s", e)
-        return TrackMeta()
-    ld = _parse_json_ld(html_text)
-    if ld.title and ld.artist:
-        return ld
-    og = _parse_og(html_text)
-    if not ld.title:
-        ld.title = og.title
-    if not ld.artist:
-        ld.artist = og.artist
-    return ld
+        logger.warning("fetch %s failed: %s", url, e)
+        return ""
 
 
-async def _spotify_embed_meta(url):
-    m = re.search(r"/track/([a-zA-Z0-9]+)", url)
-    if not m:
-        return TrackMeta(source="spotify")
-    track_id = m.group(1)
-    embed_url = SPOTIFY_EMBED.format(id=track_id)
+# ============================================================
+# External APIs
+# ============================================================
+
+async def _deezer_meta(query):
+    """Deezer API - бесплатный, отлично знает русскую музыку."""
+    if not query:
+        return TrackMeta(source="deezer")
     try:
-        async with httpx.AsyncClient(timeout=20, headers={"User-Agent": UA}, follow_redirects=True) as c:
-            r = await c.get(embed_url)
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(DEEZER_SEARCH, params={"q": query, "limit": 5})
             if r.status_code != 200:
-                return TrackMeta(source="spotify")
-            html_text = r.text
+                return TrackMeta(source="deezer")
+            data = r.json()
     except Exception as e:
-        logger.warning("Spotify embed failed: %s", e)
-        return TrackMeta(source="spotify")
+        logger.warning("Deezer failed: %s", e)
+        return TrackMeta(source="deezer")
 
-    meta = TrackMeta(source="spotify")
-    m = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', html_text)
-    if m:
-        try:
-            meta.title = json.loads('"' + m.group(1) + '"')
-        except Exception:
-            meta.title = m.group(1)
-    m = re.search(r'"subtitle"\s*:\s*"((?:[^"\\]|\\.)*)"', html_text)
-    if m:
-        try:
-            meta.artist = json.loads('"' + m.group(1) + '"')
-        except Exception:
-            meta.artist = m.group(1)
-    m = re.search(r'"duration"\s*:\s*(\d+)', html_text)
-    if m:
-        meta.duration = int(m.group(1)) // 1000
-    return meta
+    items = data.get("data") or []
+    if not items:
+        return TrackMeta(source="deezer")
+
+    q_low = query.lower()
+
+    def _s(item):
+        s = 0
+        t = (item.get("title") or "").lower()
+        a = ((item.get("artist") or {}).get("name") or "").lower()
+        if t and t in q_low:
+            s += 3
+        if a and a in q_low:
+            s += 3
+        return s
+
+    items.sort(key=_s, reverse=True)
+    first = items[0]
+    return TrackMeta(
+        artist=((first.get("artist") or {}).get("name") or "").strip(),
+        title=(first.get("title") or "").strip(),
+        duration=int(first.get("duration") or 0),
+        source="deezer",
+    )
 
 
 async def _itunes_meta(query):
-    """iTunes Search API - бесплатный, без ключа, отдаёт artist+title+duration."""
     if not query:
         return TrackMeta(source="itunes")
     try:
-        async with httpx.AsyncClient(timeout=20) as c:
-            r = await c.get(
-                ITUNES_SEARCH,
-                params={"term": query, "media": "music", "limit": 5},
-            )
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(ITUNES_SEARCH, params={"term": query, "media": "music", "limit": 5})
             if r.status_code != 200:
-                logger.warning("iTunes %s -> %s", query, r.status_code)
                 return TrackMeta(source="itunes")
             data = r.json()
-    except Exception as e:
-        logger.warning("iTunes failed: %s", e)
+    except Exception:
         return TrackMeta(source="itunes")
-
     results = data.get("results") or []
     if not results:
         return TrackMeta(source="itunes")
-
-    # скоринг по совпадению с query
     q_low = query.lower()
 
     def _s(r):
@@ -190,26 +212,55 @@ async def _itunes_meta(query):
             s += 3
         if a and a in q_low:
             s += 3
-        if q_low and q_low in f"{a} {t}":
-            s += 2
         return s
 
     results.sort(key=_s, reverse=True)
     first = results[0]
     return TrackMeta(
-        artist=first.get("artistName", "") or "",
-        title=first.get("trackName", "") or "",
+        artist=(first.get("artistName") or "").strip(),
+        title=(first.get("trackName") or "").strip(),
         duration=int((first.get("trackTimeMillis") or 0) // 1000),
         source="itunes",
     )
 
 
+# ============================================================
+# Platform metadata
+# ============================================================
+
 async def _spotify_meta(url):
-    # 1) embed
-    meta = await _spotify_embed_meta(url)
-    if meta.title and meta.artist:
-        logger.info("Spotify embed OK: artist=%r title=%r dur=%d", meta.artist, meta.title, meta.duration)
-        return meta
+    meta = TrackMeta(source="spotify")
+
+    # 1) HTML страницы -> __NEXT_DATA__
+    html_text = await _fetch_html(url)
+    if html_text:
+        nd = _parse_next_data(html_text)
+        if nd.title:
+            meta.title = nd.title
+        if nd.artist:
+            meta.artist = nd.artist
+        if nd.duration:
+            meta.duration = nd.duration
+        if meta.title and meta.artist:
+            logger.info("Spotify NEXT_DATA OK: artist=%r title=%r dur=%d", meta.artist, meta.title, meta.duration)
+            return meta
+
+        # JSON-LD
+        if not (meta.title and meta.artist):
+            ld = _parse_json_ld(html_text)
+            if ld.title and not meta.title:
+                meta.title = ld.title
+            if ld.artist and not meta.artist:
+                meta.artist = ld.artist
+            if ld.duration and not meta.duration:
+                meta.duration = ld.duration
+
+        # og fallback
+        og = _parse_og(html_text)
+        if og.title and not meta.title:
+            meta.title = og.title
+        if og.artist and not meta.artist:
+            meta.artist = og.artist
 
     # 2) oEmbed title
     if not meta.title:
@@ -219,35 +270,66 @@ async def _spotify_meta(url):
                 if r.status_code == 200:
                     meta.title = (r.json().get("title") or "").strip()
         except Exception as e:
-            logger.warning("Spotify oEmbed failed: %s", e)
+            logger.warning("oEmbed failed: %s", e)
 
-    # 3) iTunes поиск по title
+    # 3) Embed endpoint
+    if not meta.artist:
+        m = re.search(r"/track/([a-zA-Z0-9]+)", url)
+        if m:
+            try:
+                async with httpx.AsyncClient(timeout=15, headers={"User-Agent": UA}) as c:
+                    r = await c.get(SPOTIFY_EMBED.format(id=m.group(1)))
+                    if r.status_code == 200:
+                        t = r.text
+                        mt = re.search(r'"subtitle"\s*:\s*"((?:[^"\\]|\\.)*)"', t)
+                        if mt and not meta.artist:
+                            try:
+                                meta.artist = json.loads('"' + mt.group(1) + '"')
+                            except Exception:
+                                meta.artist = mt.group(1)
+            except Exception:
+                pass
+
+    # 4) Deezer
+    if meta.title and not meta.artist:
+        dz = await _deezer_meta(meta.title)
+        if dz.artist:
+            logger.info("Deezer enriched: artist=%r title=%r dur=%d", dz.artist, dz.title, dz.duration)
+            meta.artist = dz.artist
+            if dz.duration and not meta.duration:
+                meta.duration = dz.duration
+
+    # 5) iTunes
     if meta.title and not meta.artist:
         it = await _itunes_meta(meta.title)
         if it.artist:
-            logger.info("iTunes enriched: artist=%r title=%r dur=%d", it.artist, it.title, it.duration)
-            # сохраняем наш title (он точный из Spotify), берём artist + duration из iTunes
+            logger.info("iTunes enriched: artist=%r", it.artist)
             meta.artist = it.artist
             if it.duration and not meta.duration:
                 meta.duration = it.duration
 
-    # 4) page fallback
-    if not meta.artist:
-        page = await _fetch_page_meta(url)
-        if page.artist and not meta.artist:
-            meta.artist = page.artist
-        if page.duration and not meta.duration:
-            meta.duration = page.duration
-
-    logger.info("Spotify final: artist=%r title=%r dur=%d src=%s", meta.artist, meta.title, meta.duration, meta.source)
+    logger.info("Spotify final: artist=%r title=%r dur=%d", meta.artist, meta.title, meta.duration)
     return meta
 
 
 async def _yandex_meta(url):
-    page = await _fetch_page_meta(url)
-    page.source = "yandex"
-    return page
+    html_text = await _fetch_html(url)
+    if not html_text:
+        return TrackMeta(source="yandex")
+    ld = _parse_json_ld(html_text)
+    if not (ld.title and ld.artist):
+        og = _parse_og(html_text)
+        if not ld.title:
+            ld.title = og.title
+        if not ld.artist:
+            ld.artist = og.artist
+    ld.source = "yandex"
+    return ld
 
+
+# ============================================================
+# yt-dlp
+# ============================================================
 
 def _ydl_opts(fmt):
     opts = {"format": "bestaudio/best", "noplaylist": True, "quiet": True, "no_warnings": True}
@@ -262,12 +344,21 @@ def _score(entry, meta):
     t = (entry.get("title") or "").lower()
     u = (entry.get("uploader") or "").lower()
     d = entry.get("duration") or 0
-    if meta.title and meta.title.lower() in t:
-        s += 3
-    if meta.artist and meta.artist.lower() in t:
-        s += 2
-    if meta.artist and meta.artist.lower() in u:
-        s += 2
+    title_l = (meta.title or "").lower()
+    artist_l = (meta.artist or "").lower()
+
+    if title_l:
+        if title_l == t:
+            s += 5
+        elif title_l in t:
+            s += 3
+
+    if artist_l:
+        if artist_l in t:
+            s += 2
+        if artist_l in u:
+            s += 2
+
     if "official" in t:
         s += 1
     if "audio" in t:
@@ -289,13 +380,15 @@ def _sync_search_dl(query, meta, fmt, strict):
     scored = [(e, _score(e, meta)) for e in entries]
     scored.sort(key=lambda x: x[1], reverse=True)
     best, best_score = scored[0]
-    top3 = [(e.get("title", "?")[:50], s) for e, s in scored[:3]]
+    top3 = [(e.get("title", "?")[:60], s) for e, s in scored[:3]]
     logger.info("Top results: %s", top3)
 
     if strict and best_score < MIN_MATCH_SCORE:
         raise RuntimeError(
-            f"Не нашёл точного совпадения (score {best_score}, нужно {MIN_MATCH_SCORE}). "
-            "Попробуй прислать ссылку на SoundCloud или YouTube."
+            "Точного совпадения нет. Возможно:\n"
+            "• трек есть только на SoundCloud\n"
+            "• это редкий ремикс, которого нет на YouTube\n\n"
+            "Пришли ссылку на SoundCloud или YouTube."
         )
 
     best_url = best.get("webpage_url") or best.get("url")
@@ -354,7 +447,7 @@ async def download_audio(url, audio_format="mp3_320"):
         meta = await _spotify_meta(url)
         if not meta.title:
             raise RuntimeError("Не удалось извлечь метаданные Spotify")
-        q = f"ytsearch5:{meta.artist} - {meta.title}" if meta.artist else f"ytsearch5:{meta.title}"
+        q = f"ytsearch5:{meta.artist} {meta.title}" if meta.artist else f"ytsearch5:{meta.title} audio"
         logger.info("Spotify query: %s", q)
         r = await asyncio.to_thread(_sync_search_dl, q, meta, audio_format, True)
         r.platform = "spotify"
@@ -363,7 +456,7 @@ async def download_audio(url, audio_format="mp3_320"):
         meta = await _yandex_meta(url)
         if not meta.title:
             raise RuntimeError("Не удалось извлечь метаданные Яндекс.Музыки. Пришли ссылку на SoundCloud или YouTube.")
-        q = f"ytsearch5:{meta.artist} - {meta.title}" if meta.artist else f"ytsearch5:{meta.title}"
+        q = f"ytsearch5:{meta.artist} {meta.title}" if meta.artist else f"ytsearch5:{meta.title} audio"
         logger.info("Yandex query: %s", q)
         r = await asyncio.to_thread(_sync_search_dl, q, meta, audio_format, True)
         r.platform = "yandex"

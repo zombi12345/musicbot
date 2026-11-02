@@ -17,3 +17,5 @@ ADMIN_IDS = [
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN not set in .env")
+
+MAX_PLAYLIST_TRACKS = int(os.getenv("MAX_PLAYLIST_TRACKS", "20"))

@@ -53,5 +53,17 @@ async def init_db():
             );
 
             ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE;
+
+            CREATE TABLE IF NOT EXISTS track_cache (
+                url_hash TEXT PRIMARY KEY,
+                original_url TEXT,
+                platform TEXT,
+                title TEXT,
+                performer TEXT,
+                duration INTEGER,
+                file_id TEXT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                hits INTEGER DEFAULT 0
+            );
         """)
     logger.info("DB schema ready")

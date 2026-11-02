@@ -229,9 +229,10 @@ async def cb_sub_plan(call: CallbackQuery) -> None:
 # 💳 БАЛАНС
 # ============================================================
 
-async def _send_balance(message: Message, uid: int, edit: bool = False):
+async def _send_balance(message: Message, uid: int, edit: bool = False) -> None:
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
     bal = await db.get_balance(uid)
-    txs = await db.get_transactions(uid, limit=10)
+    txs = await db.get_transactions(uid, limit=5)
     mode = await db.get_billing_mode()
     free_limit = int(mode.get("free_actions_per_day", 0))
     free_used = await db.get_total_free_actions_used(uid)
@@ -240,25 +241,34 @@ async def _send_balance(message: Message, uid: int, edit: bool = False):
     text += f"💰 Текущий: <b>{bal}⭐</b>\n"
     if free_limit > 0:
         text += f"🎁 Бесплатных сегодня: <b>{max(0, free_limit - free_used)}/{free_limit}</b>\n"
+
     text += "\n━━━━━━━━━━━━━━━━━━━━━\n"
     text += await _price_lines(uid)
     text += "\n💡 <b>Кэш бесплатно</b> — повторный трек не списывает ⭐\n"
+
     if txs:
-        text += "\n━━━━━━━━━━━━━━━━━━━━━\n<b>История:</b>\n"
+        text += "\n━━━━━━━━━━━━━━━━━━━━━\n<b>Последние операции:</b>\n"
         for tx in txs:
             sign = "+" if tx["amount"] > 0 else ""
             emoji = {"topup": "➕", "charge": "💳", "manual": "✏️"}.get(tx["kind"], "•")
             act = f" · {tx['action']}" if tx["action"] else ""
             text += f"  {emoji} {sign}{tx['amount']}⭐{act}\n"
-    text += "\n💡 /buy — пополнить · /sub — подписка"
+
+    kb_rows = [
+        [InlineKeyboardButton(text="💳 Пополнить баланс", callback_data="user:buy")],
+    ]
+    if mode.get("subscription_enabled"):
+        kb_rows.append([InlineKeyboardButton(text="💎 Подписка (безлимит)", callback_data="user:menu_sub")])
+    kb_rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="user:menu")])
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
     if edit:
         try:
-            await message.edit_text(text, reply_markup=cancel_kb())
+            await message.edit_text(text, reply_markup=kb)
             return
         except Exception:
             pass
-    await message.answer(text, reply_markup=cancel_kb())
-
+    await message.answer(text, reply_markup=kb)
 
 @router.message(Command("balance"))
 @router.message(F.text == "💳 Баланс")
@@ -272,26 +282,34 @@ async def btn_balance(message: Message) -> None:
 # 💳 /buy — пополнение
 # ============================================================
 
-async def _send_buy(message: Message, uid: int):
+async def _send_buy(message: Message, uid: int) -> None:
+    from keyboards.main import balance_inline
     bal = await db.get_balance(uid)
-    prices = await db.get_action_prices()
+    mode = await db.get_billing_mode()
+
     text = (
         "💳 <b>Пополнение баланса</b>\n\n"
-        f"💰 Текущий: <b>{bal}⭐</b>\n\n"
+        f"💰 Текущий баланс: <b>{bal}⭐</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
-        "<b>Как пополнить:</b>\n\n"
-        "🔹 <b>Сейчас:</b>\n"
-        "  Напиши @admin — он зачислит\n\n"
-        "🔹 <b>Скоро:</b>\n"
-        "  Прямая оплата Telegram Stars\n\n"
+        "💡 <b>Как использовать баланс:</b>\n"
+        "  • Скачивание трека: 5⭐\n"
+        "  • Распознавание: 3⭐\n"
+        "  • Скачивание плейлиста: 20⭐\n\n"
+        "🎁 <b>Бонус:</b> повторные скачивания — <b>бесплатно</b> (кэш)\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
-        "<b>Цены:</b>\n"
+        "👇 <b>Выбери пакет пополнения:</b>\n"
+        "Оплата через <b>Telegram Stars</b> — картой или звёздами"
     )
-    for k, t in config.ACTION_KEYS.items():
-        text += f"  • {t}: {prices.get(k, 0)}⭐\n"
-    text += "\n💡 <b>Хитрость:</b> повторные скачивания <b>бесплатно</b> (кэш)"
-    await message.answer(text, reply_markup=cancel_kb())
 
+    if mode.get("subscription_enabled"):
+        text += "\n\n💎 <i>Выгоднее:</i> подписка /sub — безлимит"
+    if bal > 0:
+        text += f"\n\n✅ У тебя уже есть <b>{bal}⭐</b> на балансе."
+
+    try:
+        await message.edit_text(text, reply_markup=balance_inline())
+    except Exception:
+        await message.answer(text, reply_markup=balance_inline())
 
 @router.message(Command("buy"))
 async def cmd_buy(message: Message) -> None:

@@ -1,4 +1,4 @@
-aiogram==3.13.1
+﻿aiogram==3.13.1
 asyncpg==0.29.0
 Flask==3.0.3
 gunicorn==22.0.0
@@ -8,3 +8,4 @@ yt-dlp>=2025.1.1
 mutagen>=1.47.0
 shazamio>=0.4.2
 reportlab>=4.0.0
+imageio-ffmpeg>=0.5.1

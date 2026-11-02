@@ -14,7 +14,22 @@ except ImportError:
     _SHAZAM_AVAILABLE = False
     logger.warning("shazamio не установлен - распознавание отключено")
 
-FFMPEG_LOCATION = os.getenv("FFMPEG_LOCATION", "").strip() or "ffmpeg"
+def _resolve_ffmpeg() -> str:
+    env_path = os.getenv("FFMPEG_LOCATION", "").strip()
+    if env_path and os.path.exists(env_path):
+        return env_path
+    import shutil
+    p = shutil.which("ffmpeg")
+    if p:
+        return p
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        pass
+    return "ffmpeg"
+
+FFMPEG_LOCATION = _resolve_ffmpeg()
 
 
 def _convert_to_wav(input_path: Path, output_path: Path) -> bool:

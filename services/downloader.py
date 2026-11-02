@@ -21,7 +21,24 @@ logger = logging.getLogger(__name__)
 DOWNLOAD_DIR = Path("downloads")
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-FFMPEG_LOCATION = os.getenv("FFMPEG_LOCATION", "").strip() or None
+def _resolve_ffmpeg() -> str | None:
+    env_path = os.getenv("FFMPEG_LOCATION", "").strip()
+    if env_path and os.path.exists(env_path):
+        return env_path
+    # 1) PATH (Windows: ffmpeg.exe, Linux: ffmpeg)
+    import shutil
+    p = shutil.which("ffmpeg")
+    if p:
+        return p
+    # 2) imageio-ffmpeg (bundled binary)
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        pass
+    return None
+
+FFMPEG_LOCATION = _resolve_ffmpeg()
 SPOTIFY_OEMBED = "https://open.spotify.com/oembed"
 SPOTIFY_EMBED = "https://open.spotify.com/embed/track/{id}"
 ITUNES_SEARCH = "https://itunes.apple.com/search"

@@ -1,17 +1,18 @@
+"""Render webhook entry — свой Bot/DP/loop, без зависимости от loader.py."""
 import asyncio
 import logging
 import os
 import threading
 
+from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 from aiogram.types import Update
 from flask import Flask, abort, jsonify, request
 
-from config import LOG_LEVEL, PORT, WEBHOOK_PATH, WEBHOOK_SECRET
+from config import BOT_TOKEN, LOG_LEVEL, PORT, WEBHOOK_PATH, WEBHOOK_SECRET
 from database.postgres_db import init_db
 from handlers import setup_routers
-from loader import bot, dp
-from utils.anti_spam import AntiSpamMiddleware
-from utils.middlewares import BanMiddleware
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -19,26 +20,28 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
-
-# Отдельный loop в фоновом потоке — gthread-friendly
+# ==== ОДИН loop, ОДИН Bot, ОДИН DP — всё внутри bot_prod ====
 _loop = asyncio.new_event_loop()
-_thread = threading.Thread(target=_loop.run_forever, daemon=True)
-_thread.start()
+asyncio.set_event_loop(_loop)
 
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+)
+dp = Dispatcher()
 setup_routers(dp)
 
-# Anti-spam + Ban (как в loader.py для polling)
-_ban_mw = BanMiddleware()
-dp.message.middleware(_ban_mw)
-dp.callback_query.middleware(_ban_mw)
-dp.message.outer_middleware(AntiSpamMiddleware(msg_interval=0.6, cb_interval=0.6))
-dp.callback_query.outer_middleware(AntiSpamMiddleware(msg_interval=0.6, cb_interval=0.6))
+# init_db ДО старта Flask (pool создаётся в _loop)
+_loop.run_until_complete(init_db())
+logger.info("Bot/DP/DB ready")
 
-asyncio.run_coroutine_threadsafe(init_db(), _loop).result(timeout=30)
+# Запускаем loop в фоне
+threading.Thread(target=_loop.run_forever, daemon=True).start()
+
+app = Flask(__name__)
 
 
-def _run(coro, timeout=120):
+def _run(coro, timeout=50):
     return asyncio.run_coroutine_threadsafe(coro, _loop).result(timeout=timeout)
 
 
@@ -59,6 +62,7 @@ def version():
         has_playlists=True,
         has_lyrics=True,
         has_recognize=True,
+        mode="webhook",
     ), 200
 
 
@@ -67,8 +71,9 @@ def webhook():
     if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
         abort(403)
     try:
-        update = Update.model_validate(request.get_json(force=True))
-        _run(dp.feed_update(bot, update), timeout=90)
+        data = request.get_json(force=True)
+        update = Update.model_validate(data)
+        _run(dp.feed_update(bot, update), timeout=50)
         return "", 200
     except Exception:
         logger.exception("webhook error")

@@ -1,14 +1,22 @@
+# Secrets
 .env
+.env.local
+
+# Python
 .venv/
 venv/
 __pycache__/
 *.pyc
 *.pyo
 *.log
+
+# DB / backups
 *.db
 *.sqlite
 *.sqlite3
 backups/
+
+# Media (кроме static)
 *.pdf
 *.png
 *.jpg
@@ -16,13 +24,15 @@ backups/
 *.webp
 *.zip
 *.tmp
+downloads/
 
+# Custom
+*.bak_*
+MusicBot_scripts/
+
+# Allow static
 !static/*.png
 !static/*.jpg
 !static/*.jpeg
 !data/*.png
 !data/*.jpg
-# Scripts (не деплоим на Render)
-MusicBot_scripts/
-downloads/
-*.bak_*

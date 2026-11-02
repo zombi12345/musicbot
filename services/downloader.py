@@ -38,6 +38,24 @@ def _resolve_ffmpeg() -> str | None:
         pass
     return None
 
+def _setup_cookies_from_env():
+    """Декодирует YT_COOKIES_BASE64 из env в /tmp/cookies.txt."""
+    import base64
+    b64 = os.getenv("YT_COOKIES_BASE64", "").strip()
+    if not b64:
+        return None
+    try:
+        data = base64.b64decode(b64)
+        path = "/tmp/yt_cookies.txt" if os.name == "posix" else str(Path(__import__("tempfile").gettempdir()) / "yt_cookies.txt")
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
+    except Exception:
+        return None
+
+
+COOKIES_FILE = os.getenv("YT_COOKIES_FILE", "").strip() or _setup_cookies_from_env()
+
 FFMPEG_LOCATION = _resolve_ffmpeg()
 SPOTIFY_OEMBED = "https://open.spotify.com/oembed"
 SPOTIFY_EMBED = "https://open.spotify.com/embed/track/{id}"

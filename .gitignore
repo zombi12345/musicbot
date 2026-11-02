@@ -1,4 +1,4 @@
-# Secrets
+﻿# Secrets
 .env
 .env.local
 
@@ -16,7 +16,7 @@ __pycache__/
 *.sqlite3
 backups/
 
-# Media (кроме static)
+# Media (РєСЂРѕРјРµ static)
 *.pdf
 *.png
 *.jpg
@@ -36,3 +36,6 @@ MusicBot_scripts/
 !static/*.jpeg
 !data/*.png
 !data/*.jpg
+# YouTube cookies
+cookies.txt
+yt_cookies.txt

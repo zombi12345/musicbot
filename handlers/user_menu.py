@@ -8,7 +8,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from database import postgres_db as db
-from keyboards.main import (main_inline, 
+from keyboards.main import (
+    recognize_kb,main_inline, 
     back_to_help,
     cancel_kb,
     help_inline,

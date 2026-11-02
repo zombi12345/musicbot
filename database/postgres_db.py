@@ -159,6 +159,33 @@ async def init_db():
                     "INSERT INTO settings (key, value) VALUES ($1, $2)",
                     key, json.dumps(default, ensure_ascii=False),
                 )
+        # ==== one_time_features ====
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS one_time_features (
+                id SERIAL PRIMARY KEY,
+                code TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT,
+                price_stars INTEGER DEFAULT 0,
+                uses_limit INTEGER DEFAULT 1,
+                enabled BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+
+        # ==== user_features ====
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_features (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                feature_id INTEGER REFERENCES one_time_features(id) ON DELETE CASCADE,
+                uses_left INTEGER DEFAULT 0,
+                expires_at TIMESTAMPTZ,
+                given_by BIGINT,
+                given_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_features_user ON user_features(user_id);
+        """)
     logger.info("DB schema ready")
 
 
@@ -582,3 +609,155 @@ async def get_stats() -> dict:
         "total_payments": payments_count,
         "downloads_today": downloads_today,
     }
+
+
+async def list_one_time_features(only_enabled: bool = False) -> list:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if only_enabled:
+            rows = await conn.fetch("SELECT * FROM one_time_features WHERE enabled=TRUE ORDER BY id")
+        else:
+            rows = await conn.fetch("SELECT * FROM one_time_features ORDER BY id")
+    return [dict(r) for r in rows]
+
+
+async def get_one_time_feature(feature_id: int):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM one_time_features WHERE id=$1", feature_id)
+    return dict(row) if row else None
+
+
+async def add_one_time_feature(code: str, name: str, description: str = "", price_stars: int = 0, uses_limit: int = 1) -> int:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO one_time_features (code, name, description, price_stars, uses_limit)
+            VALUES ($1, $2, $3, $4, $5) RETURNING id
+        """, code, name, description, price_stars, uses_limit)
+    return row["id"]
+
+
+async def update_one_time_feature(feature_id: int, **kwargs) -> bool:
+    allowed = {"name", "description", "price_stars", "uses_limit", "enabled"}
+    fields, values = [], []
+    for i, (k, v) in enumerate(kwargs.items(), 1):
+        if k in allowed:
+            fields.append(f"{k} = ${i}")
+            values.append(v)
+    if not fields:
+        return False
+    values.append(feature_id)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            f"UPDATE one_time_features SET {', '.join(fields)} WHERE id = ${len(values)}",
+            *values,
+        )
+    return True
+
+
+async def delete_one_time_feature(feature_id: int) -> bool:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        res = await conn.execute("DELETE FROM one_time_features WHERE id=$1", feature_id)
+    return res.endswith("1")
+
+
+async def grant_user_feature(user_id: int, feature_id: int, uses_left: int, given_by: int | None = None, expires_at=None):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO user_features (user_id, feature_id, uses_left, expires_at, given_by)
+            VALUES ($1, $2, $3, $4, $5)
+        """, user_id, feature_id, uses_left, expires_at, given_by)
+
+
+async def revoke_user_feature(record_id: int) -> bool:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        res = await conn.execute("DELETE FROM user_features WHERE id=$1", record_id)
+    return res.endswith("1")
+
+
+async def get_user_features(user_id: int) -> list:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT uf.*, f.code, f.name, f.description, f.price_stars
+            FROM user_features uf
+            JOIN one_time_features f ON f.id = uf.feature_id
+            WHERE uf.user_id=$1
+            ORDER BY uf.given_at DESC
+        """, user_id)
+    return [dict(r) for r in rows]
+
+
+async def set_subscription_manual(user_id: int, end_date, is_paid: bool):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE users SET is_paid=$2, subscription_end=$3 WHERE user_id=$1
+        """, user_id, is_paid, end_date)
+
+
+async def revoke_subscription(user_id: int):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE users SET is_paid=FALSE, subscription_end=NULL WHERE user_id=$1
+        """, user_id)
+
+
+async def reset_trial_for_user(user_id: int):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE users SET trial_used=FALSE, trial_used_at=NULL WHERE user_id=$1
+        """, user_id)
+
+
+async def list_users(page: int, per_page: int = 10, search: str | None = None) -> tuple:
+    pool = await get_pool()
+    offset = page * per_page
+    async with pool.acquire() as conn:
+        if search:
+            pattern = f"%{search}%"
+            total = await conn.fetchval("""
+                SELECT COUNT(*) FROM users
+                WHERE CAST(user_id AS TEXT) LIKE $1 OR username ILIKE $1 OR first_name ILIKE $1
+            """, pattern) or 0
+            rows = await conn.fetch("""
+                SELECT user_id, username, first_name, is_banned, is_paid,
+                       subscription_end, trial_used, created_at, last_seen
+                FROM users
+                WHERE CAST(user_id AS TEXT) LIKE $1 OR username ILIKE $1 OR first_name ILIKE $1
+                ORDER BY created_at DESC LIMIT $2 OFFSET $3
+            """, pattern, per_page, offset)
+        else:
+            total = await conn.fetchval("SELECT COUNT(*) FROM users") or 0
+            rows = await conn.fetch("""
+                SELECT user_id, username, first_name, is_banned, is_paid,
+                       subscription_end, trial_used, created_at, last_seen
+                FROM users ORDER BY created_at DESC LIMIT $1 OFFSET $2
+            """, per_page, offset)
+    return ([dict(r) for r in rows], total)
+
+
+async def clean_track_cache(mode: str) -> int:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if mode == "all":
+            res = await conn.execute("DELETE FROM track_cache")
+        elif mode == "old":
+            res = await conn.execute(
+                "DELETE FROM track_cache WHERE created_at < NOW() - INTERVAL '90 days'"
+            )
+        else:
+            res = await conn.execute(
+                "DELETE FROM track_cache WHERE hits = 0 AND created_at < NOW() - INTERVAL '7 days'"
+            )
+    try:
+        return int(res.split()[-1])
+    except Exception:
+        return 0

@@ -1,3 +1,5 @@
+import logging
+
 import config
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
@@ -6,46 +8,106 @@ from aiogram.types import Message
 
 from database import postgres_db as db
 from keyboards.main import main_menu
-from locales import t
 from utils.checks import is_admin, is_banned
 
 router = Router(name="start")
+logger = logging.getLogger(__name__)
 
 
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
-    if await is_banned(message.from_user.id):
-        await message.answer(t("banned_alert"))
+    uid = message.from_user.id
+    if await is_banned(uid):
+        await message.answer("⛔ Вы заблокированы.")
         return
     await db.upsert_user(
-        message.from_user.id,
+        uid,
         message.from_user.username or "",
         message.from_user.first_name or "",
     )
-    admin = await is_admin(message.from_user.id)
-    await message.answer(
-        t("start_hello", name=message.from_user.first_name or "друг"),
-        reply_markup=main_menu(is_admin=admin),
+    admin = await is_admin(uid)
+    name = message.from_user.first_name or "друг"
+    text = (
+        f"🎵 <b>Привет, {name}!</b>\n\n"
+        "Я умею качать музыку из:\n"
+        "  • Spotify\n"
+        "  • SoundCloud\n"
+        "  • YouTube\n"
+        "  • Яндекс.Музыка\n"
+        "  • Bandcamp, VK, Mixcloud\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>Что умею:</b>\n"
+        "  🎵 <b>Скачивать треки</b> — пришли ссылку\n"
+        "  🎤 <b>Распознавать музыку</b> — голосовое 10-15 сек\n"
+        "  📜 <b>Хранить историю</b> — последние 10 треков\n"
+        "  📋 <b>Скачивать плейлисты</b> — до 20 треков\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>Оплата:</b>\n"
+        "  💎 Подписка — безлимит (/sub)\n"
+        "  💳 Баланс — по действиям (/buy)\n"
+        "  🎁 Триал — бесплатно один раз (/trial)\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "👇 Меню внизу. Или просто пришли ссылку.\n"
+        "💡 <b>Как работает:</b> /help или кнопка «💡 Как работает»"
     )
+    await message.answer(text, reply_markup=main_menu(is_admin=admin))
 
 
 @router.message(Command("menu"))
 async def cmd_menu(message: Message) -> None:
     admin = await is_admin(message.from_user.id)
-    await message.answer(t("menu_title"), reply_markup=main_menu(is_admin=admin))
+    await message.answer(
+        "🏠 <b>Главное меню</b>",
+        reply_markup=main_menu(is_admin=admin),
+    )
 
 
 @router.message(F.text == "🎵 Скачать трек")
-async def btn_download(message: Message) -> None:
-    await message.answer(t("download_hint"))
+async def btn_download_hint(message: Message) -> None:
+    text = (
+        "🎵 <b>Скачать трек</b>\n\n"
+        "Пришли ссылку на трек из любого сервиса:\n\n"
+        "<b>Spotify</b>\n"
+        "  <code>open.spotify.com/track/...</code>\n"
+        "  <code>open.spotify.com/album/...</code>\n"
+        "  <code>open.spotify.com/playlist/...</code>\n\n"
+        "<b>SoundCloud</b>\n"
+        "  <code>soundcloud.com/artist/track</code>\n"
+        "  <code>soundcloud.com/artist/sets/...</code>\n\n"
+        "<b>YouTube</b>\n"
+        "  <code>youtube.com/watch?v=...</code>\n"
+        "  <code>youtu.be/...</code>\n\n"
+        "<b>Яндекс.Музыка</b>\n"
+        "  <code>music.yandex.ru/album/.../track/...</code>\n\n"
+        "<b>Bandcamp, VK Музыка, Mixcloud</b> — тоже работают\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 Просто скопируй ссылку из «Поделиться» и вставь в чат.\n"
+        "Плейлисты тоже работают — до 20 треков."
+    )
+    await message.answer(text)
 
 
-@router.message(F.text == "❓ Помощь")
-async def btn_help(message: Message) -> None:
-    await message.answer(t("help_text"))
+@router.message(F.text == "🎤 Распознать")
+async def btn_recognize_hint(message: Message) -> None:
+    text = (
+        "🎤 <b>Распознать музыку</b>\n\n"
+        "Услышал трек — не знаешь название? Я найду.\n\n"
+        "<b>Как:</b>\n"
+        "1. Запиши голосовое 10-15 сек\n"
+        "2. Отправь в чат\n"
+        "3. Жди — распознаю и скачаю\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>Советы:</b>\n"
+        "  • Минимум 10 сек\n"
+        "  • Ближе к источнику звука\n"
+        "  • Лучше если слышны слова\n\n"
+        "💡 Можно отправить <b>аудио</b> или <b>видео</b>\n"
+        "💳 Не нашёл — <b>не списывается</b>"
+    )
+    await message.answer(text)
 
 
-@router.message(F.text == "📊 Мой профиль")
+@router.message(F.text == "📊 Профиль")
 async def btn_profile(message: Message) -> None:
     uid = message.from_user.id
     user = await db.get_user(uid)
@@ -55,102 +117,48 @@ async def btn_profile(message: Message) -> None:
     paid = await db.is_paid(uid)
     sub_end = user["subscription_end"].strftime("%d.%m.%Y") if user["subscription_end"] else "—"
     balance = await db.get_balance(uid)
-    status = "💎 Премиум" if paid else "🆓 Бесплатный"
-    ok, used, limit = await db.can_download(uid)
-    limit_text = "без лимита" if limit < 0 else f"{used}/{limit} сегодня"
+    total_downloads = await db.count_user_downloads(uid)
+    mode = await db.get_billing_mode()
+    free_limit = int(mode.get("free_actions_per_day", 0))
+    free_used = await db.get_total_free_actions_used(uid)
     trial = await db.get_trial()
-    trial_hint = ""
-    if trial.get("enabled") and not user["trial_used"] and not paid:
-        trial_hint = f"\n\n🎁 Доступен триал на {trial['days']} дн! Напиши /trial"
-    # Фичи юзера
-    feats = await db.get_user_features(uid)
-    feats_text = ""
-    active_feats = [f for f in feats if f["uses_left"] > 0]
-    if active_feats:
-        feats_text = "\n\n⭐ <b>Активные фичи:</b>\n"
-        for f in active_feats:
-            feats_text += f"  • {f['name']} — {f['uses_left']} исп.\n"
-    await message.answer(
-        f"👤 <b>Профиль</b>\n\n"
-        f"ID: <code>{uid}</code>\n"
-        f"Имя: {message.from_user.first_name or '—'}\n"
-        f"Статус: <b>{status}</b>\n"
-        f"Подписка до: <b>{sub_end}</b>\n"
-        f"💳 Баланс: <b>{balance}⭐</b>\n"
-        f"Скачиваний: <b>{limit_text}</b>"
-        f"{trial_hint}"
-        f"{feats_text}"
+    trial_status = "✅ использован" if user["trial_used"] else (
+        "🎁 доступен" if trial.get("enabled") else "❌ отключён"
     )
+
+    status = "💎 Premium" if paid else "🆓 Бесплатный"
+    text = (
+        f"👤 <b>Мой профиль</b>\n\n"
+        f"🆔 ID: <code>{uid}</code>\n"
+        f"📝 Имя: {user['first_name'] or '—'}\n"
+        f"📅 С нами с: {user['created_at'].strftime('%d.%m.%Y')}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>Статус:</b> {status}\n"
+    )
+    if paid:
+        text += f"📅 Подписка до: <b>{sub_end}</b>\n"
+    text += (
+        f"💳 Баланс: <b>{balance}⭐</b>\n"
+        f"🎁 Триал: {trial_status}\n"
+    )
+    if free_limit > 0:
+        text += f"🆓 Бесплатных сегодня: <b>{max(0, free_limit - free_used)}/{free_limit}</b>\n"
+    text += (
+        f"\n━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📜 Скачано треков: <b>{total_downloads}</b>\n\n"
+        f"💡 <b>Действия:</b>\n"
+        f"  • /sub — подписка\n"
+        f"  • /balance — баланс\n"
+        f"  • /buy — пополнить\n"
+        f"  • /trial — активировать триал\n"
+    )
+    await message.answer(text)
 
 
 @router.message(F.text == "👑 Админ-панель")
 async def btn_admin(message: Message, state: FSMContext) -> None:
     if not await is_admin(message.from_user.id):
-        await message.answer("⛔ Нет доступа")
         return
     from keyboards.admin import admin_menu
     await state.clear()
     await message.answer("🛠 <b>Админ-панель</b>", reply_markup=admin_menu())
-
-
-@router.message(Command("trial"))
-async def cmd_trial(message: Message) -> None:
-    uid = message.from_user.id
-    trial = await db.get_trial()
-    if not trial.get("enabled"):
-        await message.answer("🎁 Триал недоступен.")
-        return
-    if await db.is_paid(uid):
-        await message.answer("✅ У тебя уже есть активная подписка.")
-        return
-    ok = await db.activate_trial(uid)
-    if ok:
-        await message.answer(f"🎁 Триал активирован на {trial['days']} дн! Приятного пользования.")
-    else:
-        await message.answer("❌ Триал уже был использован.")
-
-@router.message(Command("balance"))
-async def cmd_balance(message: Message) -> None:
-    uid = message.from_user.id
-    bal = await db.get_balance(uid)
-    prices = await db.get_action_prices()
-    txs = await db.get_transactions(uid, limit=10)
-    text = f"💳 <b>Баланс</b>\n\n💰 У тебя: <b>{bal}⭐</b>\n\n📋 <b>Цены:</b>\n"
-    for key, title in config.ACTION_KEYS.items():
-        text += f"  • {title}: <b>{prices.get(key, 0)}⭐</b>\n"
-    if txs:
-        text += "\n📜 <b>Последние:</b>\n"
-        for tx in txs:
-            sign = "+" if tx["amount"] > 0 else ""
-            text += f"  {sign}{tx['amount']}⭐ · {tx['kind']}\n"
-    text += "\n\n💳 Пополнить: /buy · 💎 Подписка: /sub"
-    await message.answer(text)
-
-
-@router.message(Command("buy"))
-async def cmd_buy(message: Message) -> None:
-    uid = message.from_user.id
-    bal = await db.get_balance(uid)
-    prices = await db.get_action_prices()
-    text = (
-        "💳 <b>Пополнение баланса</b>\n\n"
-        f"💰 Текущий баланс: <b>{bal}⭐</b>\n\n"
-        "📋 <b>Цены за действия:</b>\n"
-    )
-    for key, title in config.ACTION_KEYS.items():
-        text += f"  • {title}: <b>{prices.get(key, 0)}⭐</b>\n"
-    text += (
-        "\n━━━━━━━━━━━━━━━━━━━━━\n"
-        "<b>Как пополнить:</b>\n\n"
-        "🔹 <b>Через админа (сейчас):</b>\n"
-        "  Напиши @admin — он зачислит на баланс\n\n"
-        "🔹 <b>Через Telegram Stars (скоро):</b>\n"
-        "  Прямая оплата в боте, картой или звёздами\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "<b>Зачем нужен баланс:</b>\n"
-        "  • Скачивание треков — списывается цена\n"
-        "  • Распознавание музыки — списывается цена\n"
-        "  • Кэш — повторные скачивания <b>бесплатно</b>\n\n"
-        "💡 <b>Выгоднее подписка:</b> /sub — безлимит на всё"
-    )
-    await message.answer(text)

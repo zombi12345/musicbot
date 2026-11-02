@@ -230,6 +230,19 @@ async def init_db():
                 created_at TIMESTAMPTZ DEFAULT NOW()
             );
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS downloads_history (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                url TEXT,
+                title TEXT,
+                performer TEXT,
+                platform TEXT,
+                file_id TEXT,
+                downloaded_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_dl_history_user ON downloads_history(user_id);
+        """)
     logger.info("DB schema ready")
 
 
@@ -990,3 +1003,105 @@ async def get_withdrawal_stats() -> dict:
         "withdrawn": withdrawn,
         "available": available,
     }
+
+async def get_analytics(days: int = 7) -> dict:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        d = int(days)
+        new_users = await conn.fetchval(
+            f"SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '{d} days'"
+        ) or 0
+        downloads = await conn.fetchval(
+            f"SELECT COALESCE(SUM(count),0) FROM usage_counters WHERE usage_date >= CURRENT_DATE - INTERVAL '{d} days'"
+        ) or 0
+        subs_income = await conn.fetchval(
+            f"SELECT COALESCE(SUM(stars_paid),0) FROM payments WHERE created_at >= NOW() - INTERVAL '{d} days'"
+        ) or 0
+        topup_income = await conn.fetchval(
+            f"SELECT COALESCE(SUM(amount),0) FROM transactions WHERE kind='topup' AND created_at >= NOW() - INTERVAL '{d} days'"
+        ) or 0
+        new_paid = await conn.fetchval(
+            f"SELECT COUNT(DISTINCT user_id) FROM payments WHERE created_at >= NOW() - INTERVAL '{d} days'"
+        ) or 0
+        active = await conn.fetchval(
+            f"SELECT COUNT(*) FROM users WHERE last_seen >= NOW() - INTERVAL '{d} days'"
+        ) or 0
+    return {
+        "days": days,
+        "new_users": new_users,
+        "new_paid": new_paid,
+        "active": active,
+        "downloads": downloads,
+        "subs_income": subs_income,
+        "topup_income": topup_income,
+        "total_income": subs_income + topup_income,
+    }
+
+
+async def get_users_for_filter(filter_type: str) -> list:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if filter_type == "paid":
+            rows = await conn.fetch("SELECT user_id FROM users WHERE is_paid=TRUE AND is_banned=FALSE")
+        elif filter_type == "free":
+            rows = await conn.fetch("SELECT user_id FROM users WHERE is_paid=FALSE AND is_banned=FALSE")
+        elif filter_type == "active7":
+            rows = await conn.fetch("SELECT user_id FROM users WHERE last_seen >= NOW() - INTERVAL '7 days' AND is_banned=FALSE")
+        elif filter_type == "with_balance":
+            rows = await conn.fetch("""
+                SELECT ub.user_id FROM user_balances ub
+                JOIN users u ON u.user_id = ub.user_id
+                WHERE ub.balance > 0 AND u.is_banned = FALSE
+            """)
+        else:
+            rows = await conn.fetch("SELECT user_id FROM users WHERE is_banned=FALSE")
+    return [r["user_id"] for r in rows]
+
+
+async def get_users_export() -> list:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT u.user_id, u.username, u.first_name, u.is_paid,
+                   u.subscription_end, u.trial_used, u.is_banned,
+                   u.created_at, u.last_seen,
+                   COALESCE(ub.balance, 0) AS balance
+            FROM users u
+            LEFT JOIN user_balances ub ON ub.user_id = u.user_id
+            ORDER BY u.created_at DESC
+        """)
+    return [dict(r) for r in rows]
+
+# ============================================================
+# DOWNLOADS HISTORY
+# ============================================================
+
+async def add_download_history(user_id: int, url: str, title: str,
+                                performer: str, platform: str, file_id: str = None):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO downloads_history (user_id, url, title, performer, platform, file_id)
+            VALUES ($1, $2, $3, $4, $5, $6)
+        """, user_id, url, title, performer, platform, file_id)
+
+
+async def get_user_downloads(user_id: int, limit: int = 10) -> list:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT title, performer, platform, url, downloaded_at
+            FROM downloads_history
+            WHERE user_id = $1
+            ORDER BY downloaded_at DESC LIMIT $2
+        """, user_id, limit)
+    return [dict(r) for r in rows]
+
+
+async def count_user_downloads(user_id: int) -> int:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        val = await conn.fetchval(
+            "SELECT COUNT(*) FROM downloads_history WHERE user_id=$1", user_id
+        )
+    return int(val or 0)

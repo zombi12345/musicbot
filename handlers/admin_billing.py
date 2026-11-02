@@ -4,10 +4,10 @@ import logging
 import config
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardMarkup, Message
 
 from database import postgres_db as db
-from keyboards.admin import withdrawal_kb, withdrawal_help_kb, admin_menu, back_kb, balance_kb, billing_kb, prices_kb
+from keyboards.admin import _b, bcast_filter_kb, help_kb, withdrawal_kb, withdrawal_help_kb, admin_menu, back_kb, balance_kb, billing_kb, prices_kb
 from states import AdminBillingStates
 from utils.checks import is_admin
 
@@ -405,4 +405,300 @@ async def cb_earnings(call: CallbackQuery) -> None:
         await call.message.edit_text(text, reply_markup=back_kb())
     except Exception:
         await call.message.answer(text, reply_markup=back_kb())
+    await call.answer()
+
+# ============================================================
+# ANALYTICS
+# ============================================================
+
+@router.callback_query(F.data == "adm:analytics")
+async def cb_analytics(call: CallbackQuery) -> None:
+    if not await _guard_cb(call):
+        return
+    d7 = await db.get_analytics(7)
+    d30 = await db.get_analytics(30)
+    text = (
+        "📈 <b>Аналитика</b>\n\n"
+        "<b>За 7 дней:</b>\n"
+        f"  👥 Новых: <b>{d7['new_users']}</b>\n"
+        f"  💎 Стали платными: <b>{d7['new_paid']}</b>\n"
+        f"  🟢 Активных: <b>{d7['active']}</b>\n"
+        f"  🎵 Скачиваний: <b>{d7['downloads']}</b>\n"
+        f"  💰 Доход: <b>{d7['total_income']}⭐</b>\n"
+        f"    (подписки {d7['subs_income']} + пополнения {d7['topup_income']})\n\n"
+        "<b>За 30 дней:</b>\n"
+        f"  👥 Новых: <b>{d30['new_users']}</b>\n"
+        f"  💎 Стали платными: <b>{d30['new_paid']}</b>\n"
+        f"  🟢 Активных: <b>{d30['active']}</b>\n"
+        f"  🎵 Скачиваний: <b>{d30['downloads']}</b>\n"
+        f"  💰 Доход: <b>{d30['total_income']}⭐</b>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [_b("🔄 Обновить", "adm:analytics")],
+        [_b("⬅️ Назад", "adm:back")],
+    ])
+    try:
+        await call.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        await call.message.answer(text, reply_markup=kb)
+    await call.answer()
+
+
+# ============================================================
+# EXPORT CSV
+# ============================================================
+
+@router.callback_query(F.data == "adm:export")
+async def cb_export(call: CallbackQuery) -> None:
+    if not await _guard_cb(call):
+        return
+    rows = await db.get_users_export()
+    if not rows:
+        await call.answer("Нет юзеров", show_alert=True)
+        return
+    import csv
+    import io
+    import time
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["user_id", "username", "first_name", "is_paid", "subscription_end",
+                "trial_used", "is_banned", "balance", "created_at", "last_seen"])
+    for r in rows:
+        w.writerow([
+            r["user_id"], r["username"] or "", r["first_name"] or "",
+            "yes" if r["is_paid"] else "no",
+            r["subscription_end"].isoformat() if r["subscription_end"] else "",
+            "yes" if r["trial_used"] else "no",
+            "yes" if r["is_banned"] else "no",
+            r["balance"],
+            r["created_at"].isoformat() if r["created_at"] else "",
+            r["last_seen"].isoformat() if r["last_seen"] else "",
+        ])
+    data = buf.getvalue().encode("utf-8-sig")
+    fname = f"users_export_{int(time.time())}.csv"
+    file = BufferedInputFile(data, filename=fname)
+    await call.message.answer_document(file, caption=f"📊 {len(rows)} юзеров")
+    await call.answer("Готово")
+
+
+# ============================================================
+# BROADCAST BY FILTER
+# ============================================================
+
+@router.callback_query(F.data == "adm:bcast_filter")
+async def cb_bcast_filter(call: CallbackQuery, state: FSMContext) -> None:
+    if not await _guard_cb(call):
+        return
+    await state.clear()
+    text = (
+        "📨 <b>Рассылка по фильтру</b>\n\n"
+        "Выбери аудиторию:\n\n"
+        "• <b>Все</b> — все незабаненные\n"
+        "• <b>Подписчики</b> — только с активной подпиской\n"
+        "• <b>Без подписки</b> — free, на кого давим\n"
+        "• <b>Активные 7д</b> — тёплые, заходили недавно\n"
+        "• <b>С балансом</b> — есть ⭐ на счёте"
+    )
+    try:
+        await call.message.edit_text(text, reply_markup=bcast_filter_kb())
+    except Exception:
+        await call.message.answer(text, reply_markup=bcast_filter_kb())
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("adm:bcast_do:"))
+async def cb_bcast_do(call: CallbackQuery, state: FSMContext) -> None:
+    if not await _guard_cb(call):
+        return
+    filter_type = call.data.split(":")[-1]
+    users = await db.get_users_for_filter(filter_type)
+    if not users:
+        await call.answer("Нет юзеров в этой группе", show_alert=True)
+        return
+    await state.set_state(AdminBillingStates.bcast_filter_text)
+    await state.update_data(bcast_filter=filter_type, bcast_ids=users)
+    await call.message.answer(
+        f"📨 <b>Рассылка</b> · фильтр <code>{filter_type}</code>\n"
+        f"Получателей: <b>{len(users)}</b>\n\n"
+        f"Пришли текст (HTML разрешён). /cancel — отмена."
+    )
+    await call.answer()
+
+
+@router.message(AdminBillingStates.bcast_filter_text)
+async def msg_bcast_filter_text(message: Message, state: FSMContext) -> None:
+    if not await _guard_msg(message):
+        return
+    text = message.html_text if message.text else ""
+    if not text or len(text) > 4000:
+        await message.answer("Пустой или слишком длинный (макс 4000).")
+        return
+    data = await state.get_data()
+    await state.clear()
+    ids = data.get("bcast_ids", [])
+    from utils.broadcast import broadcast
+    status_msg = await message.answer(f"📨 0/{len(ids)}")
+    async def on_progress(done, total, stats):
+        try:
+            await status_msg.edit_text(
+                f"📨 <b>Рассылка</b>\n{done}/{total}\n"
+                f"✅ {stats['sent']} · 🚫 {stats['blocked']} · ❌ {stats['failed']}"
+            )
+        except Exception:
+            pass
+    stats = await broadcast(message.bot, ids, text, on_progress=on_progress)
+    try:
+        await status_msg.edit_text(
+            f"✅ <b>Готово</b>\n\n"
+            f"Отправлено: <b>{stats['sent']}</b>\n"
+            f"Заблокировали: {stats['blocked']}\n"
+            f"Ошибок: {stats['failed']}"
+        )
+    except Exception:
+        pass
+
+
+# ============================================================
+# HELP
+# ============================================================
+
+@router.callback_query(F.data == "adm:help")
+async def cb_help(call: CallbackQuery) -> None:
+    if not await _guard_cb(call):
+        return
+    text = (
+        "📖 <b>Инструкции по админке</b>\n\n"
+        "Выбери раздел для подробной справки.\n\n"
+        "📊 <b>Статистика</b> — общие цифры\n"
+        "📈 <b>Аналитика</b> — доход и рост за 7/30 дней\n"
+        "👥 <b>Юзеры</b> — поиск, бан, баланс, подписка\n"
+        "💎 <b>Подписки</b> — кто активен, кто истекает\n"
+        "🎁 <b>Триал</b> — вкл/выкл, срок, сброс\n"
+        "💰 <b>Прайс</b> — тарифы подписки\n"
+        "⚙️ <b>Биллинг</b> — режимы монетизации\n"
+        "💵 <b>Цены</b> — цена за действие\n"
+        "💵 <b>Заработок</b> — сколько заработано\n"
+        "📤 <b>Вывод</b> — вывод Stars через BotFather\n"
+        "📢 <b>Рассылка</b> — всем\n"
+        "📨 <b>По фильтру</b> — выборочно\n"
+        "💾 <b>Экспорт</b> — CSV всех юзеров\n"
+        "👑 <b>Админы</b> — добавить/удалить\n"
+        "🗑 <b>Кэш</b> — очистка track_cache"
+    )
+    try:
+        await call.message.edit_text(text, reply_markup=help_kb())
+    except Exception:
+        await call.message.answer(text, reply_markup=help_kb())
+    await call.answer()
+
+
+HELP_TEXTS = {
+    "help_u": (
+        "👥 <b>Юзеры</b>\n\n"
+        "<b>Список:</b> пагинация 10/стр, 🔍 поиск\n"
+        "Иконки: 💎 подписка · 🆓 free · 🚫 бан\n\n"
+        "<b>В карточке:</b>\n"
+        "• 🚫/✅ — бан/разбан (полная блокировка)\n"
+        "• 💎 Дать подписку — 7/30/90/365/свой\n"
+        "• ❌ Снять подписку — обнулить\n"
+        "• 🎁 Сбросить триал — заново активирует\n"
+        "• 💳 Баланс — начислить/списать ⭐\n"
+        "• 📨 Написать — личное сообщение"
+    ),
+    "help_sub": (
+        "💎 <b>Подписки</b>\n\n"
+        "Показывает активные и кто истекает за 7 дней.\n\n"
+        "<b>Выдать:</b>\n"
+        "👥 Юзеры → тап → 💎 Дать подписку\n\n"
+        "<b>Тарифы:</b> 💰 Прайс\n\n"
+        "Подписка = <b>безлимит</b> на все действия (если в Биллинге вкл)."
+    ),
+    "help_trial": (
+        "🎁 <b>Триал</b>\n\n"
+        "Бесплатный период для новых.\n\n"
+        "<b>Настройки:</b>\n"
+        "• Вкл/выкл — глобально\n"
+        "• Срок — 1-365 дней\n"
+        "• 🔄 Сбросить флаги — все могут активировать снова\n\n"
+        "<b>Как работает:</b>\n"
+        "Юзер пишет /trial → если не использовал → получает X дней\n"
+        "Флаг trial_used=TRUE → второй раз отказ"
+    ),
+    "help_price": (
+        "💰 <b>Тарифы подписки</b>\n\n"
+        "Стандарт: 7/30/90 дней.\n"
+        "Тап на тариф → ввести дни → ввести звёзды.\n\n"
+        "<b>Советы:</b>\n"
+        "• 7д — пробный, дороже/день\n"
+        "• 30д — стандарт\n"
+        "• 90д — выгодный\n\n"
+        "Оплата: Telegram Stars (@BotFather → Payments)"
+    ),
+    "help_bill": (
+        "⚙️ <b>Биллинг</b>\n\n"
+        "<b>💎 Подписка</b>\n"
+        "Вкл — подписчики безлимит\n"
+        "Выкл — все платят\n\n"
+        "<b>💳 Pay-per-use</b>\n"
+        "Вкл — без подписки за действия\n"
+        "Выкл — без подписки никак\n\n"
+        "<b>🎁 Бесплатных в день</b>\n"
+        "0 — полностью платно\n"
+        "3 — 3 действия/день free\n\n"
+        "<b>Рекомендую:</b> Подписка ✅ + PPU ✅ + free=3"
+    ),
+    "help_cost": (
+        "💵 <b>Цены за действия</b>\n\n"
+        "<b>Рекомендации:</b>\n"
+        "• Трек — 5⭐ (3-10)\n"
+        "• Распознать — 3⭐ (1-5)\n"
+        "• Плейлист — 20⭐ (10-30)\n\n"
+        "<b>Логика:</b>\n"
+        "Платит только за первое скачивание.\n"
+        "Повторное — кэш, бесплатно.\n\n"
+        "<b>PPU выгоден:</b>\n"
+        "Дешёвый вход, платят активные"
+    ),
+    "help_wd": (
+        "📤 <b>Вывод Stars</b>\n\n"
+        "<b>Через BotFather:</b>\n"
+        "1. /mybots → твой бот\n"
+        "2. Payments → Stars → Withdraw\n"
+        "3. Указать TON-кошелёк\n"
+        "4. Минимум 1000⭐\n"
+        "5. Срок до 21 дня\n\n"
+        "<b>В боте:</b>\n"
+        "📝 Записать вывод — после реального получения\n"
+        "📜 История — все записи\n\n"
+        "<b>Доступно к выводу</b> = заработано − выведено − на балансах.\n"
+        "Не выводи что на балансах — юзеры потратят."
+    ),
+    "help_bcast": (
+        "📢 <b>Рассылки</b>\n\n"
+        "<b>Два типа:</b>\n"
+        "📢 Всем — все незабаненные\n"
+        "📨 По фильтру — выборочно\n\n"
+        "<b>Фильтры:</b>\n"
+        "• 💎 Подписчики — апселл\n"
+        "• 🆓 Free — конверсия\n"
+        "• 🟢 Активные 7д — тёплые\n"
+        "• 💰 С балансом — стимул потратить\n\n"
+        "<b>HTML:</b> &lt;b&gt;жирный&lt;/b&gt;, &lt;i&gt;курсив&lt;/i&gt;\n"
+        "⚠️ Не используй символ &lt; в тексте — сломает разметку\n"
+        "Лимит: 4000 символов."
+    ),
+}
+
+
+@router.callback_query(F.data.startswith("adm:help_"))
+async def cb_help_topic(call: CallbackQuery) -> None:
+    if not await _guard_cb(call):
+        return
+    topic = call.data.replace("adm:", "")
+    text = HELP_TEXTS.get(topic, "Не найдено")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[_b("⬅️ Назад", "adm:help")]])
+    try:
+        await call.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        await call.message.answer(text, reply_markup=kb)
     await call.answer()

@@ -7,15 +7,15 @@ def _b(text, cb):
 
 def admin_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [_b("📊 Статистика", "adm:stats"), _b("👥 Юзеры", "adm:users:0")],
+        [_b("📊 Статистика", "adm:stats"), _b("📈 Аналитика", "adm:analytics")],
+        [_b("👥 Юзеры", "adm:users:0"), _b("💎 Подписки", "adm:subs")],
+        [_b("🎁 Триал", "adm:trial"), _b("💰 Прайс", "adm:pricing")],
         [_b("⚙️ Биллинг", "adm:billing"), _b("💵 Цены", "adm:prices")],
-        [_b("💎 Подписки", "adm:subs"), _b("🎁 Триал", "adm:trial")],
-        [_b("💰 Прайс", "adm:pricing"), _b("📤 Вывод", "adm:withdrawal")],
-        [_b("👑 Админы", "adm:admins"), _b("📢 Рассылка", "adm:broadcast")],
-        [_b("💵 Заработок", "adm:earnings"), _b("🗑 Кэш", "adm:cache")],
+        [_b("💵 Заработок", "adm:earnings"), _b("📤 Вывод", "adm:withdrawal")],
+        [_b("📢 Рассылка", "adm:broadcast"), _b("📨 По фильтру", "adm:bcast_filter")],
+        [_b("💾 Экспорт", "adm:export"), _b("👑 Админы", "adm:admins")],
+        [_b("🗑 Кэш", "adm:cache"), _b("📖 Помощь", "adm:help")],
     ])
-
-
 def back_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[_b("⬅️ Назад", "adm:back")]])
 
@@ -183,4 +183,24 @@ def withdrawal_kb(stats, has_history) -> InlineKeyboardMarkup:
 def withdrawal_help_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [_b("⬅️ Назад", "adm:withdrawal")],
+    ])
+
+def bcast_filter_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [_b("👥 Все юзеры", "adm:bcast_do:all")],
+        [_b("💎 Только подписчики", "adm:bcast_do:paid")],
+        [_b("🆓 Без подписки", "adm:bcast_do:free")],
+        [_b("🟢 Активные (7д)", "adm:bcast_do:active7")],
+        [_b("💰 С балансом", "adm:bcast_do:with_balance")],
+        [_b("⬅️ Назад", "adm:back")],
+    ])
+
+
+def help_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [_b("👥 Юзеры", "adm:help_u"), _b("💎 Подписки", "adm:help_sub")],
+        [_b("🎁 Триал", "adm:help_trial"), _b("💰 Прайс", "adm:help_price")],
+        [_b("⚙️ Биллинг", "adm:help_bill"), _b("💵 Цены", "adm:help_cost")],
+        [_b("📤 Вывод", "adm:help_wd"), _b("📢 Рассылка", "adm:help_bcast")],
+        [_b("⬅️ Назад", "adm:back")],
     ])

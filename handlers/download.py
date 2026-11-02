@@ -121,6 +121,12 @@ async def _process_spotify_playlist(message: Message, url: str, status: Message)
             result = await asyncio.to_thread(_sync_search_dl, q, meta, "mp3_320", True)
             audio = FSInputFile(str(result.filepath), filename=result.filepath.name)
             await db.finalize_action(message.from_user.id, "download_track", reason, price)
+            try:
+                await db.add_download_history(
+                    message.from_user.id, url, result.title, result.performer, result.platform, None
+                )
+            except Exception:
+                pass
             file_id = await _send_audio_safe(
                 message,
                 audio=audio,
@@ -180,6 +186,12 @@ async def _process_ytdlp_playlist(message: Message, url: str, status: Message) -
             result = await download_audio(track_url)
             audio = FSInputFile(str(result.filepath), filename=result.filepath.name)
             await db.finalize_action(message.from_user.id, "download_track", reason, price)
+            try:
+                await db.add_download_history(
+                    message.from_user.id, url, result.title, result.performer, result.platform, None
+                )
+            except Exception:
+                pass
             file_id = await _send_audio_safe(
                 message,
                 audio=audio,

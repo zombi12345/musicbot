@@ -25,3 +25,4 @@ backups/
 # Scripts (не деплоим на Render)
 MusicBot_scripts/
 downloads/
+*.bak_*

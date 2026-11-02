@@ -13,7 +13,7 @@ from services.downloader import cleanup, download_audio, _sync_search_dl, TrackM
 from services.platforms import Platform, detect_platform
 from database import postgres_db as db
 
-from services.playlist import parse_spotify_playlist
+from services.playlist import parse_spotify_playlist, parse_yandex_album
 from utils.urls import url_hash
 
 router = Router(name="download")
@@ -150,7 +150,64 @@ async def _process_spotify_playlist(message: Message, url: str, status: Message)
 def _probe_playlist(url: str) -> dict:
     opts = {"quiet": True, "skip_download": True, "extract_flat": True, "noplaylist": False}
     with yt_dlp.YoutubeDL(opts) as ydl:
-        return ydl.extract_info(url, download=False)
+        info = ydl.extract_info(url, download=False)
+        if not info:
+            raise RuntimeError("yt-dlp не смог обработать эту ссылку")
+        return info
+
+
+
+
+async def _process_yandex_playlist(message: Message, url: str, status: Message) -> None:
+    playlist = await parse_yandex_album(url, max_tracks=MAX_PLAYLIST_TRACKS)
+    if not playlist or not playlist.tracks:
+        raise RuntimeError(
+            "Не удалось разобрать альбом/плейлист Яндекс.Музыки.\n\n"
+            "Возможно, он приватный или содержит только превью."
+        )
+    total = len(playlist.tracks)
+    sent = 0
+    for i, track in enumerate(playlist.tracks, 1):
+        try:
+            await status.edit_text(
+                f"📋 <b>{playlist.title}</b>\n"
+                f"Скачиваю {i}/{total}: {track.artist} — {track.name}"
+            )
+            key_url = f"yandex_search:{track.artist} {track.name}"
+            h = url_hash(key_url)
+            cached = await get_cached(h)
+            if cached:
+                await message.answer_audio(
+                    audio=cached["file_id"],
+                    title=cached["title"] or None,
+                    performer=cached["performer"] or None,
+                    duration=cached["duration"] or None,
+                )
+                sent += 1
+                continue
+
+            meta = TrackMeta(title=track.name, artist=track.artist, duration=track.duration)
+            q = f"ytsearch5:{meta.artist} {meta.title}" if meta.artist else f"ytsearch5:{meta.title}"
+            result = await asyncio.to_thread(_sync_search_dl, q, meta, "mp3_320", True)
+            audio = FSInputFile(str(result.filepath), filename=result.filepath.name)
+            file_id = await _send_audio_safe(
+                message,
+                audio=audio,
+                title=result.title or None,
+                performer=result.performer or None,
+                duration=result.duration or None,
+            )
+            if file_id:
+                await save_cached(h, key_url, "yandex", result.title, result.performer, result.duration, file_id)
+            cleanup(result.filepath)
+            sent += 1
+        except Exception as e:
+            logger.exception("yandex playlist track %d failed", i)
+            await message.answer(f"❌ {i}. {track.artist} — {track.name}: {html.escape(str(e))[:200]}")
+    try:
+        await status.edit_text(f"✅ <b>{playlist.title}</b> — готово: {sent}/{total}")
+    except Exception:
+        pass
 
 
 async def _process_ytdlp_playlist(message: Message, url: str, status: Message) -> None:
@@ -258,6 +315,8 @@ async def handle_url(message: Message) -> None:
             if _is_playlist(url):
                 if platform == Platform.SPOTIFY:
                     await _process_spotify_playlist(message, url, status)
+                elif platform == Platform.YANDEX:
+                    await _process_yandex_playlist(message, url, status)
                 else:
                     await _process_ytdlp_playlist(message, url, status)
             else:

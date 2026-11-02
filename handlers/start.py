@@ -27,6 +27,20 @@ async def cmd_start(message: Message) -> None:
     )
     admin = await is_admin(uid)
     name = message.from_user.first_name or "друг"
+    paid = await db.is_paid(uid)
+    mode = await db.get_billing_mode()
+    if config.FREE_MODE or paid:
+        pay_line = "  💎 У тебя <b>безлимит</b> — просто пришли ссылку"
+    elif mode.get("subscription_enabled") and not mode.get("pay_per_use_enabled"):
+        pay_line = "  💎 Подписка /sub — безлимит"
+    elif mode.get("subscription_enabled") and mode.get("pay_per_use_enabled"):
+        pay_line = "  💎 Подписка /sub — безлимит · 💳 Или /balance (по действиям)"
+    else:
+        pay_line = "  💳 Баланс — по действиям (/buy)"
+    if await db.get_trial_enabled_or_false() if False else (await db.get_trial()).get("enabled"):
+        user = await db.get_user(uid)
+        if user and not user.get("trial_used"):
+            pay_line += "\n  🎁 Триал /trial — бесплатно"
     text = (
         f"🎵 <b>Привет, {name}!</b>\n\n"
         "Я умею качать музыку из:\n"
@@ -43,9 +57,7 @@ async def cmd_start(message: Message) -> None:
         "  📋 <b>Скачивать плейлисты</b> — до 20 треков\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         "<b>Оплата:</b>\n"
-        "  💎 Подписка — безлимит (/sub)\n"
-        "  💳 Баланс — по действиям (/buy)\n"
-        "  🎁 Триал — бесплатно один раз (/trial)\n\n"
+        "{pay_line}\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         "👇 Меню внизу. Или просто пришли ссылку.\n"
         "💡 <b>Как работает:</b> /help или кнопка «💡 Как работает»"

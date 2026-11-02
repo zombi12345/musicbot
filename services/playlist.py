@@ -84,3 +84,97 @@ async def parse_spotify_playlist(url: str, max_tracks: int = 20) -> PlaylistResu
                 url=track_url,
             ))
     return result
+
+async def parse_yandex_album(url: str, max_tracks: int = 20):
+    """Парсит альбом/плейлист Яндекс.Музыки через HTML JSON-LD."""
+    import json as _json
+    import re as _re
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=25,
+            headers={"User-Agent": UA, "Accept-Language": "ru-RU,ru;q=0.9"},
+            follow_redirects=True,
+        ) as c:
+            r = await c.get(url)
+            if r.status_code != 200:
+                logger.warning("yandex %s -> %s", url, r.status_code)
+                return None
+            html = r.text
+    except Exception:
+        logger.exception("yandex fetch failed")
+        return None
+
+    title = "Альбом Яндекс.Музыки"
+    tracks = []
+
+    # Ищем все JSON-LD
+    for m in _re.finditer(
+        r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>',
+        html, _re.DOTALL,
+    ):
+        try:
+            data = _json.loads(m.group(1).strip())
+        except Exception:
+            continue
+        items = data if isinstance(data, list) else [data]
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            typ = it.get("@type", "")
+            if typ in ("MusicAlbum", "MusicPlaylist"):
+                title = it.get("name") or title
+                tracks_raw = it.get("track") or []
+                if isinstance(tracks_raw, dict):
+                    tracks_raw = [tracks_raw]
+                for t in tracks_raw:
+                    if not isinstance(t, dict):
+                        continue
+                    name = t.get("name") or ""
+                    artist = ""
+                    by = t.get("byArtist")
+                    if isinstance(by, dict):
+                        artist = by.get("name", "")
+                    elif isinstance(by, list) and by:
+                        artist = by[0].get("name", "") if isinstance(by[0], dict) else ""
+                    # duration из ISO
+                    dur = t.get("duration", "")
+                    duration = 0
+                    if isinstance(dur, str) and dur.startswith("PT"):
+                        mm = _re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", dur)
+                        if mm:
+                            h, mi, s = (int(x) if x else 0 for x in mm.groups())
+                            duration = h * 3600 + mi * 60 + s
+                    if name:
+                        tracks.append({
+                            "name": name,
+                            "artist": artist,
+                            "duration": duration,
+                            "url": "",
+                        })
+
+    # Fallback: og:title
+    if not tracks:
+        m = _re.search(
+            r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
+            html,
+        )
+        if m:
+            title = m.group(1).strip()
+
+    if not tracks:
+        return None
+
+    # Возвращаем в формате PlaylistResult
+    return PlaylistResult(
+        title=title,
+        tracks=[
+            TrackRef(
+                name=t["name"],
+                artist=t["artist"],
+                duration=t["duration"],
+                url=t["url"],
+            )
+            for t in tracks[:max_tracks]
+        ],
+    )

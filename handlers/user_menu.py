@@ -19,6 +19,32 @@ from keyboards.main import (
 from utils.checks import is_banned
 
 router = Router(name="user_menu")
+async def _price_lines(uid: int) -> str:
+    """Показывает цены только если PPU реально основной режим."""
+    import config as _cfg
+    paid = await db.is_paid(uid)
+    if _cfg.FREE_MODE:
+        return "💎 <b>У тебя безлимит</b> (free_mode)\n"
+    if paid:
+        return "💎 <b>У тебя активна подписка — безлимит</b>\n"
+    mode = await db.get_billing_mode()
+    if mode.get("subscription_enabled") and not mode.get("pay_per_use_enabled"):
+        return "💎 <b>Оформи подписку /sub</b> — безлимит\n"
+    if mode.get("subscription_enabled") and mode.get("pay_per_use_enabled"):
+        # Оба режима — показываем что можно так или так
+        prices = await db.get_action_prices()
+        lines = "💡 <b>Два варианта:</b>\n"
+        lines += "  💎 Подписка /sub — безлимит\n"
+        lines += "  💳 Или за действие:\n"
+        for k, t in _cfg.ACTION_KEYS.items():
+            lines += f"     • {t}: {prices.get(k, 0)}⭐\n"
+        return lines
+    # Только PPU
+    prices = await db.get_action_prices()
+    lines = "📋 <b>Цены за действие:</b>\n"
+    for k, t in _cfg.ACTION_KEYS.items():
+        lines += f"  • {t}: {prices.get(k, 0)}⭐\n"
+    return lines
 logger = logging.getLogger(__name__)
 
 
@@ -181,9 +207,7 @@ async def btn_balance(message: Message) -> None:
     if free_limit > 0:
         text += f"🎁 Бесплатных сегодня: <b>{max(0, free_limit - free_used)}/{free_limit}</b>\n"
     text += "\n━━━━━━━━━━━━━━━━━━━━━\n"
-    text += "<b>Цены за действие:</b>\n"
-    for key, title in config.ACTION_KEYS.items():
-        text += f"  • {title}: <b>{prices.get(key, 0)}⭐</b>\n"
+    text += await _price_lines(uid)
     text += "\n💡 <b>Кэш бесплатно:</b> повторная отправка ссылки не списывает ⭐\n"
     if txs:
         text += "\n━━━━━━━━━━━━━━━━━━━━━\n"

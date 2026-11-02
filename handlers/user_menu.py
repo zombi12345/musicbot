@@ -17,6 +17,7 @@ from keyboards.main import (main_inline,
     tracks_inline,
 )
 from utils.checks import is_admin, is_banned
+from states import UserLyricsStates
 
 router = Router(name="user_menu")
 logger = logging.getLogger(__name__)
@@ -602,17 +603,33 @@ async def cmd_lyrics(message: Message) -> None:
 
 
 @router.message(F.text == "📝 Текст песни")
-async def btn_lyrics(message: Message) -> None:
+async def btn_lyrics(message: Message, state: FSMContext) -> None:
     if await is_banned(message.from_user.id):
         return
+    from states import UserLyricsStates
+    await state.set_state(UserLyricsStates.waiting_query)
     await message.answer(
         "📝 <b>Текст песни</b>\n\n"
         "Напиши: <code>Исполнитель - Название</code>\n\n"
         "Например: <code>Imagine Dragons - Believer</code>\n\n"
         "💡 Или ссылку: /lyrics URL\n"
-        "💡 Или /lyrics после скачивания",
+        "💡 Или /lyrics после скачивания\n\n"
+        "🔴 <b>Жду запрос...</b>",
         reply_markup=cancel_kb(),
     )
+
+
+@router.message(UserLyricsStates.waiting_query)
+async def msg_lyrics_query(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    query = (message.text or "").strip()
+    if not query or query == "/cancel":
+        await message.answer("❌ Отменено.")
+        return
+    if len(query) < 3:
+        await message.answer("⚠️ Слишком коротко. Напиши: Исполнитель - Название")
+        return
+    await _do_lyrics(message, query)
 
 
 async def _do_lyrics(message: Message, query: str) -> None:

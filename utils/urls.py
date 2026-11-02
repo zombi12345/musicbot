@@ -1,5 +1,5 @@
 import hashlib
-from urllib.parse import urlparse, urlunparse, parse_qs
+from urllib.parse import parse_qs, urlparse, urlunparse
 
 
 def normalize_url(url: str) -> str:

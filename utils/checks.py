@@ -30,7 +30,6 @@ async def is_main_admin(user_id: int) -> bool:
 
 
 async def has_access(user_id: int) -> bool:
-    """Есть ли доступ к скачиванию (paid или активный триал)."""
     if config.FREE_MODE:
         return True
     try:
@@ -39,6 +38,5 @@ async def has_access(user_id: int) -> bool:
         return False
 
 
-async def can_download(user_id: int) -> tuple[bool, int, int]:
-    """Возвращает (ok, использовано, лимит)."""
+async def can_download(user_id: int):
     return await db.can_download(user_id)

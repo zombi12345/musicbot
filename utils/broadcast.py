@@ -1,12 +1,13 @@
 import asyncio
 import logging
+
 from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 
 logger = logging.getLogger(__name__)
 
 
-async def broadcast(bot: Bot, user_ids: list[int], text: str, on_progress=None) -> dict:
+async def broadcast(bot: Bot, user_ids: list, text: str, on_progress=None) -> dict:
     stats = {"sent": 0, "blocked": 0, "failed": 0}
     total = len(user_ids)
     for i, uid in enumerate(user_ids, 1):

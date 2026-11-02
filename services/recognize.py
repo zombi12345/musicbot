@@ -42,7 +42,7 @@ def _convert_to_wav(input_path: Path, output_path: Path) -> bool:
         return False
 
 
-async def _do_recognize(shazam: "Shazam", path: Path) -> dict | None:
+async def _do_recognize(shazam, path: Path):
     out = await shazam.recognize(str(path))
     if not out or not out.get("track"):
         return None
@@ -54,7 +54,7 @@ async def _do_recognize(shazam: "Shazam", path: Path) -> dict | None:
     }
 
 
-async def recognize_file(audio_path: Path) -> dict | None:
+async def recognize_file(audio_path: Path):
     if not _SHAZAM_AVAILABLE:
         return None
 
@@ -62,7 +62,12 @@ async def recognize_file(audio_path: Path) -> dict | None:
     used_wav = False
     shazam = None
     try:
-        logger.info("recognize: in=%s size=%d", audio_path.name, audio_path.stat().st_size if audio_path.exists() else 0)`n        ok = await asyncio.to_thread(_convert_to_wav, audio_path, wav_path)
+        logger.info(
+            "recognize: in=%s size=%d",
+            audio_path.name,
+            audio_path.stat().st_size if audio_path.exists() else 0,
+        )
+        ok = await asyncio.to_thread(_convert_to_wav, audio_path, wav_path)
         used_wav = ok
         if not ok:
             logger.warning("WAV conversion failed, trying original file")
@@ -72,7 +77,6 @@ async def recognize_file(audio_path: Path) -> dict | None:
         try:
             return await _do_recognize(shazam, target)
         finally:
-            # Закрываем внутреннюю aiohttp-сессию
             try:
                 close = getattr(shazam, "close", None)
                 if close:
@@ -82,7 +86,7 @@ async def recognize_file(audio_path: Path) -> dict | None:
             except Exception as e:
                 logger.debug("shazam close failed: %s", e)
     except Exception:
-        logger.exception("shazam recognize failed"); import traceback; traceback.print_exc()
+        logger.exception("shazam recognize failed")
         return None
     finally:
         if used_wav and wav_path.exists():

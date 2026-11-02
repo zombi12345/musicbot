@@ -332,7 +332,27 @@ async def _yandex_meta(url):
 # ============================================================
 
 def _ydl_opts(fmt):
-    opts = {"format": "bestaudio/best", "noplaylist": True, "quiet": True, "no_warnings": True}
+    opts = {
+        "format": "bestaudio/best",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "no_color": True,
+        "color": "no_color",
+        # Retries для нестабильных серверов Google
+        "retries": 5,
+        "fragment_retries": 5,
+        "socket_timeout": 30,
+        "file_access_retries": 3,
+        "extractor_retries": 3,
+        # HTTP заголовки — уменьшают 403
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+        # Пропускаем треки с geo-block
+        "geo_bypass": True,
+    }
     if FFMPEG_LOCATION:
         opts["ffmpeg_location"] = FFMPEG_LOCATION
     opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "320" if fmt == "mp3_320" else "192"}]

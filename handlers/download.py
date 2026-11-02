@@ -114,12 +114,12 @@ async def _process_single(message: Message, url: str, status: Message) -> None:
 # ============================================================
 
 async def _send_playlist_track(message: Message, i: int, total: int, track) -> bool:
-    """Скачивает один трек из плейлиста. True если отправлен."""
-    try:
-        key_url = track.url or f"search:{track.artist} {track.name}"
-        h = url_hash(key_url)
-        cached = await get_cached(h)
-        if cached:
+    """Скачивает один трек из плейлиста с fallback на SoundCloud."""
+    key_url = track.url or f"search:{track.artist} {track.name}"
+    h = url_hash(key_url)
+    cached = await get_cached(h)
+    if cached:
+        try:
             await message.answer_audio(
                 audio=cached["file_id"],
                 title=cached["title"] or None,
@@ -127,8 +127,13 @@ async def _send_playlist_track(message: Message, i: int, total: int, track) -> b
                 duration=cached["duration"] or None,
             )
             return True
+        except Exception as e:
+            logger.warning("cache send failed: %s", e)
 
-        meta = TrackMeta(title=track.name, artist=track.artist, duration=track.duration)
+    meta = TrackMeta(title=track.name, artist=track.artist, duration=track.duration)
+
+    # Попытка 1: YouTube (ytsearch5)
+    try:
         q = f"ytsearch5:{meta.artist} {meta.title}" if meta.artist else f"ytsearch5:{meta.title}"
         result = await asyncio.to_thread(_sync_search_dl, q, meta, "mp3_320", True)
         audio = FSInputFile(str(result.filepath), filename=result.filepath.name)
@@ -143,10 +148,32 @@ async def _send_playlist_track(message: Message, i: int, total: int, track) -> b
             await save_cached(h, key_url, "playlist", result.title, result.performer, result.duration, file_id)
         cleanup(result.filepath)
         return True
-    except Exception as e:
-        logger.exception("playlist track %d failed", i)
+    except Exception as e1:
+        logger.warning("YT failed for %s - %s: %s", meta.artist, meta.title, e1)
+
+    # Попытка 2: SoundCloud (ytsearch через scsearch)
+    try:
+        q = f"scsearch3:{meta.artist} {meta.title}" if meta.artist else f"scsearch3:{meta.title}"
+        result = await asyncio.to_thread(_sync_search_dl, q, meta, "mp3_320", False)
+        audio = FSInputFile(str(result.filepath), filename=result.filepath.name)
+        file_id = await _send_audio_safe(
+            message,
+            audio=audio,
+            title=result.title or None,
+            performer=result.performer or None,
+            duration=result.duration or None,
+        )
+        if file_id:
+            await save_cached(h, key_url, "playlist_sc", result.title, result.performer, result.duration, file_id)
+        cleanup(result.filepath)
+        return True
+    except Exception as e2:
+        logger.exception("SC also failed for %s", track.name)
         try:
-            await message.answer(f"❌ {i}. {html.escape(str(track.name))}: {html.escape(str(e))[:100]}")
+            await message.answer(
+                f"❌ {i}. {html.escape(str(track.artist or ''))} — {html.escape(str(track.name))}\n"
+                f"<i>Не удалось скачать ни с YouTube, ни с SoundCloud</i>"
+            )
         except Exception:
             pass
         return False

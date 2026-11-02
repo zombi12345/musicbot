@@ -18,7 +18,6 @@ def admin_menu() -> InlineKeyboardMarkup:
         [_b("🏠 Главное меню", "user:menu")],
     ])
 
-
 def back_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [_b("⬅️ Назад", "adm:back")],

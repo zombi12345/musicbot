@@ -1105,3 +1105,17 @@ async def count_user_downloads(user_id: int) -> int:
             "SELECT COUNT(*) FROM downloads_history WHERE user_id=$1", user_id
         )
     return int(val or 0)
+
+async def record_payment(charge_id: str, user_id: int, amount: int,
+                          days: int = 0, source: str = "stars") -> bool:
+    """Идемпотентная запись платежа. True если новый, False если дубль."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute("""
+                INSERT INTO payments (user_id, stars_paid, days, payment_id, source)
+                VALUES ($1, $2, $3, $4, $5)
+            """, user_id, amount, days, charge_id, source)
+            return True
+        except asyncpg.UniqueViolationError:
+            return False

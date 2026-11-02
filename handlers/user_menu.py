@@ -4,12 +4,15 @@ import logging
 import config
 from aiogram import F, Router
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from database import postgres_db as db
+from states import UserLyricsStates
 from keyboards.main import (
     back_to_help,
     help_inline,
+    lyrics_cancel_kb,
     sub_inline,
     tracks_inline,
 )
@@ -558,4 +561,272 @@ async def cb_hint_download(call: CallbackQuery) -> None:
         "<b>Spotify · SoundCloud · YouTube · Яндекс · Bandcamp · VK · Mixcloud</b>\n\n"
         "Или нажми 🎤 для распознавания."
     )
+    await call.answer()
+
+# ============================================================
+# 📋 ПЛЕЙЛИСТ — инструкция
+# ============================================================
+
+@router.message(F.text == "📋 Плейлист")
+async def btn_playlist_hint(message: Message) -> None:
+    if await is_banned(message.from_user.id):
+        return
+    text = (
+        "📋 <b>Скачать плейлист</b>\n\n"
+        "Пришли ссылку на <b>плейлист или альбом</b> —\n"
+        "скачаю все треки по порядку.\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>Что поддерживается:</b>\n\n"
+        "<b>Spotify:</b>\n"
+        "  <code>open.spotify.com/album/...</code>\n"
+        "  <code>open.spotify.com/playlist/...</code>\n\n"
+        "<b>SoundCloud:</b>\n"
+        "  <code>soundcloud.com/artist/sets/...</code>\n\n"
+        "<b>YouTube:</b>\n"
+        "  <code>youtube.com/playlist?list=...</code>\n"
+        "  <code>youtube.com/watch?v=...&amp;list=...</code>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "⚠️ <b>Ограничения:</b>\n"
+        "• Максимум <b>20 треков</b> за раз\n"
+        "• Приватные плейлисты не работают\n"
+        "• Если трек не найден — придёт сообщение\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 <b>Как это выглядит:</b>\n"
+        "  1. Пришлёшь ссылку\n"
+        "  2. Я скачиваю по одному (5-20 сек каждый)\n"
+        "  3. Прогресс: <i>1/10, 2/10...</i>\n"
+        "  4. Пропуски — с пометкой что не нашёл"
+    )
+    await message.answer(text)
+
+
+@router.callback_query(F.data == "user:help_playlist")
+async def cb_help_playlist(call: CallbackQuery) -> None:
+    text = (
+        "📋 <b>Плейлисты — подробно</b>\n\n"
+        "<b>Как работает:</b>\n"
+        "Бот видит что ссылка на плейлист (а не трек),\n"
+        "и скачивает <b>все треки по очереди</b>.\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>Лимиты:</b>\n"
+        "• До <b>20 треков</b> за раз\n"
+        "• Каждый — 5-20 сек\n"
+        "• Общее время: до 5 минут на 20 треков\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>Оплата:</b>\n"
+        "• Подписка — <b>безлимит</b>\n"
+        "• Баланс — цена <b>за каждый трек</b> отдельно\n"
+        "• Кэш — если трек уже качал, <b>бесплатно</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 <b>Совет:</b>\n"
+        "Скачиваешь много плейлистов? Возьми подписку /sub — выгоднее."
+    )
+    try:
+        await call.message.edit_text(text, reply_markup=back_to_help())
+    except Exception:
+        await call.message.answer(text, reply_markup=back_to_help())
+    await call.answer()
+
+
+# ============================================================
+# 📝 ТЕКСТ ПЕСНИ — Lyrics
+# ============================================================
+
+@router.message(F.text == "📝 Текст песни")
+async def btn_lyrics(message: Message, state: FSMContext) -> None:
+    if await is_banned(message.from_user.id):
+        return
+    await state.set_state(UserLyricsStates.waiting_query)
+    await message.answer(
+        "📝 <b>Текст песни</b>\n\n"
+        "Напиши в формате:\n"
+        "<code>Исполнитель - Название</code>\n\n"
+        "Например:\n"
+        "  <code>Imagine Dragons - Believer</code>\n"
+        "  <code>Баста - Сансара</code>\n"
+        "  <code>Coldplay - Yellow</code>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 <b>Или:</b>\n"
+        "  • Скачай трек — тогда /lyrics без аргументов сам подхватит\n"
+        "  • Можно через запятую: <code>Imagine Dragons, Believer</code>\n\n"
+        "/cancel — отмена",
+        reply_markup=lyrics_cancel_kb(),
+    )
+
+
+@router.message(Command("lyrics"))
+async def cmd_lyrics(message: Message, state: FSMContext) -> None:
+    if await is_banned(message.from_user.id):
+        return
+    # Проверяем аргументы
+    parts = message.text.split(maxsplit=1)
+    if len(parts) > 1:
+        # Есть аргументы — сразу ищем
+        query = parts[1].strip()
+        await _do_lyrics_search(message, query)
+        return
+
+    # Без аргументов — пробуем взять последний трек
+    last_track = await db.get_user_downloads(message.from_user.id, limit=1)
+    if last_track:
+        t = last_track[0]
+        artist = t.get("performer") or ""
+        title = t.get("title") or ""
+        if title:
+            await message.answer(
+                f"📝 Ищу текст: <b>{html.escape(artist)} — {html.escape(title)}</b>..."
+            )
+            await _do_lyrics_search(message, f"{artist} - {title}")
+            return
+
+    # Ничего нет — просим ввести
+    await state.set_state(UserLyricsStates.waiting_query)
+    await message.answer(
+        "📝 <b>Текст песни</b>\n\n"
+        "Напиши: <code>Исполнитель - Название</code>\n\n"
+        "Например: <code>Imagine Dragons - Believer</code>\n\n"
+        "/cancel — отмена",
+        reply_markup=lyrics_cancel_kb(),
+    )
+
+
+@router.message(UserLyricsStates.waiting_query)
+async def msg_lyrics_query(message: Message, state: FSMContext) -> None:
+    if message.text == "/cancel":
+        await state.clear()
+        await message.answer("❌ Отменено.")
+        return
+    query = (message.text or "").strip()
+    if len(query) < 3:
+        await message.answer("⚠️ Слишком коротко. Напиши: Исполнитель - Название")
+        return
+    await state.clear()
+    await _do_lyrics_search(message, query)
+
+
+@router.callback_query(F.data == "user:lyrics_cancel")
+async def cb_lyrics_cancel(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    try:
+        await call.message.edit_text("❌ Отменено.")
+    except Exception:
+        pass
+    await call.answer()
+
+
+async def _do_lyrics_search(message: Message, query: str) -> None:
+    """Ищет текст и отправляет."""
+    from services.lyrics import fetch_lyrics, clean_lyrics
+    import asyncio
+
+    # Парсим "Исполнитель - Название" или "Исполнитель, Название"
+    artist = ""
+    title = query
+    for sep in [" - ", " – ", " — ", ", "]:
+        if sep in query:
+            parts = query.split(sep, 1)
+            artist = parts[0].strip()
+            title = parts[1].strip()
+            break
+
+    status = await message.answer("🔎 Ищу текст...")
+    result = await asyncio.to_thread(
+        lambda: __import__("asyncio").run(fetch_lyrics(artist, title))
+    ) if False else await fetch_lyrics(artist, title)
+
+    if not result:
+        try:
+            await status.edit_text(
+                f"❌ <b>Текст не найден</b>\n\n"
+                f"Исполнитель: <i>{html.escape(artist or '—')}</i>\n"
+                f"Название: <i>{html.escape(title)}</i>\n\n"
+                "💡 <b>Что попробовать:</b>\n"
+                "  • Проверь написание\n"
+                "  • Попробуй по-другому: <code>Название - Исполнитель</code>\n"
+                "  • Песня может быть не в базе lrclib\n"
+                "  • Редкие/новые треки отсутствуют"
+            )
+        except Exception:
+            pass
+        return
+
+    lyrics_text = clean_lyrics(result["lyrics"])
+    source = result["source"]
+
+    header = (
+        f"📝 <b>{html.escape(artist or '—')} — {html.escape(title)}</b>\n"
+        f"<i>Источник: {source}</i>\n\n"
+    )
+
+    # Telegram лимит 4096, оставим место под header
+    MAX = 3800
+    escaped_lyrics = html.escape(lyrics_text)
+
+    if len(header) + len(escaped_lyrics) <= 4096:
+        try:
+            await status.edit_text(header + escaped_lyrics)
+        except Exception as e:
+            await status.edit_text(f"❌ Ошибка отправки: {e}")
+        return
+
+    # Разбиваем на части
+    await status.delete()
+    await message.answer(header + "<i>(текст будет частями)</i>")
+
+    chunk_size = MAX
+    chunks = []
+    escaped = escaped_lyrics
+    while escaped:
+        # Пытаемся разбить по \n\n
+        if len(escaped) <= chunk_size:
+            chunks.append(escaped)
+            break
+        cut = escaped.rfind("\n\n", 0, chunk_size)
+        if cut < 1000:
+            cut = escaped.rfind("\n", 0, chunk_size)
+        if cut < 1000:
+            cut = chunk_size
+        chunks.append(escaped[:cut])
+        escaped = escaped[cut:].lstrip("\n")
+
+    for i, chunk in enumerate(chunks, 1):
+        part_header = f"<b>Часть {i}/{len(chunks)}</b>\n\n" if len(chunks) > 1 else ""
+        try:
+            await message.answer(part_header + chunk)
+        except Exception as e:
+            logger.exception("chunk send failed")
+            await message.answer(f"❌ Ошибка части {i}: {e}")
+            break
+
+
+@router.callback_query(F.data == "user:help_lyrics")
+async def cb_help_lyrics(call: CallbackQuery) -> None:
+    text = (
+        "📝 <b>Текст песни</b>\n\n"
+        "<b>Как использовать:</b>\n\n"
+        "🔹 <b>Кнопка в меню</b>\n"
+        "Нажми <b>📝 Текст песни</b> → напиши:\n"
+        "<code>Исполнитель - Название</code>\n\n"
+        "🔹 <b>Команда /lyrics</b>\n"
+        "<code>/lyrics Imagine Dragons - Believer</code>\n"
+        "→ сразу найдёт и пришлёт\n\n"
+        "🔹 <b>После скачивания</b>\n"
+        "<code>/lyrics</code> без аргументов\n"
+        "→ возьмёт последний скачанный трек\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>Источники:</b>\n"
+        "• <b>lrclib.net</b> — большая открытая база\n"
+        "• <b>lyrics.ovh</b> — fallback\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 <b>Если не находит:</b>\n"
+        "• Редкая/новая песня — может отсутствовать\n"
+        "• Проверь написание\n"
+        "• Попробуй по-английски если русская\n"
+        "• Многие ремиксы без официального текста\n\n"
+        "💰 <b>Бесплатно</b> — текст не тратит баланс."
+    )
+    try:
+        await call.message.edit_text(text, reply_markup=back_to_help())
+    except Exception:
+        await call.message.answer(text, reply_markup=back_to_help())
     await call.answer()

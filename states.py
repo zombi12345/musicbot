@@ -37,3 +37,6 @@ class AdminBillingStates(StatesGroup):
     bill_free_count = State()
     price_action_edit = State()
     balance_custom = State()
+
+class UserLyricsStates(StatesGroup):
+    waiting_query = State()

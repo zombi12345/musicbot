@@ -22,3 +22,5 @@ backups/
 !static/*.jpeg
 !data/*.png
 !data/*.jpg
+# Scripts (не деплоим на Render)
+MusicBot_scripts/

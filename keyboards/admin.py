@@ -15,11 +15,15 @@ def admin_menu() -> InlineKeyboardMarkup:
         [_b("📢 Рассылка", "adm:broadcast"), _b("📨 По фильтру", "adm:bcast_filter")],
         [_b("💾 Экспорт", "adm:export"), _b("👑 Админы", "adm:admins")],
         [_b("🗑 Кэш", "adm:cache"), _b("📖 Помощь", "adm:help")],
+        [_b("🏠 Главное меню", "user:menu")],
     ])
+
+
 def back_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[_b("⬅️ Назад", "adm:back")]])
-
-
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [_b("⬅️ Назад", "adm:back")],
+        [_b("🏠 Главное меню", "user:menu")],
+    ])
 def users_list_kb(rows, page, total_pages) -> InlineKeyboardMarkup:
     kb = []
     for u in rows:

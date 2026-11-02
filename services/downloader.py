@@ -1,4 +1,4 @@
-"""Скачивание аудио: SoundCloud/YouTube прямо, Spotify/Yandex через метаданные + ytsearch5."""
+"""Скачивание аудио: SoundCloud/YouTube напрямую, Spotify/Yandex через метаданные + ytsearch5."""
 import asyncio
 import json
 import logging
@@ -23,7 +23,9 @@ DOWNLOAD_DIR.mkdir(exist_ok=True)
 
 FFMPEG_LOCATION = os.getenv("FFMPEG_LOCATION", "").strip() or None
 SPOTIFY_OEMBED = "https://open.spotify.com/oembed"
+SPOTIFY_EMBED = "https://open.spotify.com/embed/track/{id}"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+MIN_MATCH_SCORE = 4
 
 
 @dataclass
@@ -120,22 +122,65 @@ async def _fetch_page_meta(url):
     return ld
 
 
-async def _spotify_meta(url):
+async def _spotify_embed_meta(url):
+    """open.spotify.com/embed/track/{id} - JSON с title, subtitle (artist), duration (ms)."""
+    m = re.search(r"/track/([a-zA-Z0-9]+)", url)
+    if not m:
+        return TrackMeta(source="spotify")
+    track_id = m.group(1)
+    embed_url = SPOTIFY_EMBED.format(id=track_id)
+    try:
+        async with httpx.AsyncClient(timeout=20, headers={"User-Agent": UA}, follow_redirects=True) as c:
+            r = await c.get(embed_url)
+            if r.status_code != 200:
+                logger.warning("Spotify embed %s -> %s", track_id, r.status_code)
+                return TrackMeta(source="spotify")
+            html = r.text
+    except Exception as e:
+        logger.warning("Spotify embed fetch failed: %s", e)
+        return TrackMeta(source="spotify")
+
     meta = TrackMeta(source="spotify")
+    m = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', html)
+    if m:
+        try:
+            meta.title = json.loads('"' + m.group(1) + '"')
+        except Exception:
+            meta.title = m.group(1)
+    m = re.search(r'"subtitle"\s*:\s*"((?:[^"\\]|\\.)*)"', html)
+    if m:
+        try:
+            meta.artist = json.loads('"' + m.group(1) + '"')
+        except Exception:
+            meta.artist = m.group(1)
+    m = re.search(r'"duration"\s*:\s*(\d+)', html)
+    if m:
+        meta.duration = int(m.group(1)) // 1000
+    return meta
+
+
+async def _spotify_meta(url):
+    meta = await _spotify_embed_meta(url)
+    if meta.title and meta.artist:
+        logger.info("Spotify embed OK: artist=%r title=%r dur=%d", meta.artist, meta.title, meta.duration)
+        return meta
+
     try:
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.get(SPOTIFY_OEMBED, params={"url": url})
-            if r.status_code == 200:
+            if r.status_code == 200 and not meta.title:
                 meta.title = (r.json().get("title") or "").strip()
     except Exception as e:
         logger.warning("Spotify oEmbed failed: %s", e)
+
     page = await _fetch_page_meta(url)
-    if page.title:
+    if page.title and not meta.title:
         meta.title = page.title
-    if page.artist:
+    if page.artist and not meta.artist:
         meta.artist = page.artist
-    if page.duration:
+    if page.duration and not meta.duration:
         meta.duration = page.duration
+    logger.info("Spotify fallback meta: artist=%r title=%r dur=%d", meta.artist, meta.title, meta.duration)
     return meta
 
 
@@ -173,7 +218,7 @@ def _score(entry, meta):
     return s
 
 
-def _sync_search_dl(query, meta, fmt):
+def _sync_search_dl(query, meta, fmt, strict):
     with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}) as ydl:
         info = ydl.extract_info(query, download=False)
     if not info or "entries" not in info:
@@ -181,11 +226,24 @@ def _sync_search_dl(query, meta, fmt):
     entries = [e for e in info["entries"] if e]
     if not entries:
         raise RuntimeError("Поиск пустой")
-    best = max(entries, key=lambda e: _score(e, meta))
+
+    scored = [(e, _score(e, meta)) for e in entries]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    best, best_score = scored[0]
+    top3 = [(e.get("title", "?")[:50], s) for e, s in scored[:3]]
+    logger.info("Top results: %s", top3)
+
+    if strict and best_score < MIN_MATCH_SCORE:
+        raise RuntimeError(
+            f"Не нашёл точного совпадения (score {best_score} < {MIN_MATCH_SCORE}). "
+            "Пришли ссылку на SoundCloud или YouTube — скачаю напрямую."
+        )
+
     best_url = best.get("webpage_url") or best.get("url")
     if not best_url:
         raise RuntimeError("Не нашёл URL")
-    logger.info("Picked: %s | score=%d", best.get("title"), _score(best, meta))
+    logger.info("Picked: %s | score=%d", best.get("title"), best_score)
+
     opts = _ydl_opts(fmt)
     opts["outtmpl"] = str(DOWNLOAD_DIR / "%(title).80s.%(ext)s")
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -193,6 +251,7 @@ def _sync_search_dl(query, meta, fmt):
         if "entries" in dl:
             dl = dl["entries"][0]
         fp = Path(ydl.prepare_filename(dl)).with_suffix(".mp3")
+
     final_title = meta.title or dl.get("title") or "Unknown"
     final_artist = meta.artist or dl.get("uploader") or "Unknown"
     try:
@@ -237,8 +296,8 @@ async def download_audio(url, audio_format="mp3_320"):
         if not meta.title:
             raise RuntimeError("Не удалось извлечь метаданные Spotify")
         q = f"ytsearch5:{meta.artist} - {meta.title}" if meta.artist else f"ytsearch5:{meta.title}"
-        logger.info("Spotify meta: artist=%r title=%r dur=%d -> %s", meta.artist, meta.title, meta.duration, q)
-        r = await asyncio.to_thread(_sync_search_dl, q, meta, audio_format)
+        logger.info("Spotify query: %s", q)
+        r = await asyncio.to_thread(_sync_search_dl, q, meta, audio_format, True)
         r.platform = "spotify"
         return r
     if platform == Platform.YANDEX:
@@ -246,8 +305,8 @@ async def download_audio(url, audio_format="mp3_320"):
         if not meta.title:
             raise RuntimeError("Не удалось извлечь метаданные Яндекс.Музыки. Пришли ссылку на SoundCloud или YouTube.")
         q = f"ytsearch5:{meta.artist} - {meta.title}" if meta.artist else f"ytsearch5:{meta.title}"
-        logger.info("Yandex meta: artist=%r title=%r dur=%d -> %s", meta.artist, meta.title, meta.duration, q)
-        r = await asyncio.to_thread(_sync_search_dl, q, meta, audio_format)
+        logger.info("Yandex query: %s", q)
+        r = await asyncio.to_thread(_sync_search_dl, q, meta, audio_format, True)
         r.platform = "yandex"
         return r
     if platform in (Platform.SOUNDCLOUD, Platform.YOUTUBE):

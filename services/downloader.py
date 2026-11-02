@@ -444,7 +444,7 @@ def _sync_search_dl(query, meta, fmt, strict, fast: bool = False):
     return DownloadResult(filepath=fp, title=final_title, performer=final_artist, duration=int(dl.get("duration") or 0))
 
 
-def _sync_direct(url, fmt):
+def _sync_direct(url, fmt, fast: bool = False):
     opts = _ydl_opts(fmt, fast=fast)
     opts["outtmpl"] = str(DOWNLOAD_DIR / "%(title).80s.%(ext)s")
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -488,7 +488,7 @@ async def download_audio(url, audio_format="mp3_320"):
         r.platform = "yandex"
         return r
     if platform in (Platform.SOUNDCLOUD, Platform.YOUTUBE):
-        r = await asyncio.to_thread(_sync_direct, url, audio_format)
+        r = await asyncio.to_thread(_sync_direct, url, audio_format, fast=True)
         r.platform = platform.value
         return r
     raise RuntimeError(f"Платформа не поддерживается: {platform.value}")

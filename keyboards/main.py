@@ -21,8 +21,7 @@ def main_inline(is_admin: bool = False) -> InlineKeyboardMarkup:
          InlineKeyboardButton(text="🎤 Распознать", callback_data="user:menu_recognize")],
         [InlineKeyboardButton(text="📋 Плейлист", callback_data="user:menu_playlist"),
          InlineKeyboardButton(text="📝 Текст песни", callback_data="user:menu_lyrics")],
-        [InlineKeyboardButton(text="📜 Мои треки", callback_data="user:tracks"),
-         InlineKeyboardButton(text="📊 Профиль", callback_data="user:menu_profile")],
+        [InlineKeyboardButton(text="📊 Профиль", callback_data="user:menu_profile")],
         [InlineKeyboardButton(text="💎 Подписка", callback_data="user:menu_sub"),
          InlineKeyboardButton(text="💳 Баланс", callback_data="user:menu_balance")],
         [InlineKeyboardButton(text="🎁 Триал", callback_data="user:menu_trial"),
@@ -69,12 +68,6 @@ def back_to_help() -> InlineKeyboardMarkup:
     ])
 
 
-def tracks_inline(has_tracks: bool) -> InlineKeyboardMarkup:
-    kb = []
-    if has_tracks:
-        kb.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="user:tracks")])
-    kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="user:menu")])
-    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 def cancel_kb(callback: str = "user:menu") -> InlineKeyboardMarkup:
@@ -92,4 +85,10 @@ def recognize_kb() -> InlineKeyboardMarkup:
 def lyrics_cancel_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Отмена", callback_data="user:lyrics_cancel")],
+    ])
+
+def tracks_inline(has_tracks: bool = False) -> InlineKeyboardMarkup:
+    """Stub — функционал 'Мои треки' удалён."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="user:menu")],
     ])

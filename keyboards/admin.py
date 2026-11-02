@@ -10,9 +10,9 @@ def admin_menu() -> InlineKeyboardMarkup:
         [_b("📊 Статистика", "adm:stats"), _b("👥 Юзеры", "adm:users:0")],
         [_b("⚙️ Биллинг", "adm:billing"), _b("💵 Цены", "adm:prices")],
         [_b("💎 Подписки", "adm:subs"), _b("🎁 Триал", "adm:trial")],
-        [_b("💰 Прайс", "adm:pricing"), _b("⭐ Фичи", "adm:features")],
+        [_b("💰 Прайс", "adm:pricing"), _b("📤 Вывод", "adm:withdrawal")],
         [_b("👑 Админы", "adm:admins"), _b("📢 Рассылка", "adm:broadcast")],
-        [_b("🗑 Кэш", "adm:cache")],
+        [_b("💵 Заработок", "adm:earnings"), _b("🗑 Кэш", "adm:cache")],
     ])
 
 
@@ -56,7 +56,6 @@ def user_card_kb(uid, is_banned, is_paid) -> InlineKeyboardMarkup:
     kb.append([_b("🎁 Сбросить триал", f"adm:u_trial_rm:{uid}")])
     # Фичи
     kb.append([_b("💳 Баланс", f"adm:u_bal:{uid}")])
-    kb.append([_b("⭐ Выдать фичу", f"adm:u_feature:{uid}")])
     # Связь
     kb.append([_b("📨 Написать", f"adm:u_msg:{uid}")])
     kb.append([_b("⬅️ К списку", "adm:users:0")])
@@ -168,4 +167,20 @@ def balance_kb(uid) -> InlineKeyboardMarkup:
         [_b("➕ +100⭐", f"adm:bal_add:{uid}:100"), _b("✏️ Своё", f"adm:bal_custom:{uid}")],
         [_b("➖ Обнулить", f"adm:bal_zero:{uid}")],
         [_b("⬅️ К юзеру", f"adm:u:{uid}")],
+    ])
+
+def withdrawal_kb(stats, has_history) -> InlineKeyboardMarkup:
+    kb = []
+    if stats.get("available", 0) > 0:
+        kb.append([_b("📝 Записать вывод", "adm:wd_add")])
+    if has_history:
+        kb.append([_b("📜 История выводов", "adm:wd_history")])
+    kb.append([_b("📖 Инструкция", "adm:wd_help")])
+    kb.append([_b("⬅️ Назад", "adm:back")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def withdrawal_help_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [_b("⬅️ Назад", "adm:withdrawal")],
     ])

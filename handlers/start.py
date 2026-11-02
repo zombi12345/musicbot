@@ -123,14 +123,34 @@ async def cmd_balance(message: Message) -> None:
         for tx in txs:
             sign = "+" if tx["amount"] > 0 else ""
             text += f"  {sign}{tx['amount']}⭐ · {tx['kind']}\n"
-    text += "\n\nПополнить: /buy"
+    text += "\n\n💳 Пополнить: /buy · 💎 Подписка: /sub"
     await message.answer(text)
 
 
 @router.message(Command("buy"))
 async def cmd_buy(message: Message) -> None:
-    await message.answer(
+    uid = message.from_user.id
+    bal = await db.get_balance(uid)
+    prices = await db.get_action_prices()
+    text = (
         "💳 <b>Пополнение баланса</b>\n\n"
-        "Оплата через Telegram Stars — скоро.\n"
-        "Пока обратись к админу."
+        f"💰 Текущий баланс: <b>{bal}⭐</b>\n\n"
+        "📋 <b>Цены за действия:</b>\n"
     )
+    for key, title in config.ACTION_KEYS.items():
+        text += f"  • {title}: <b>{prices.get(key, 0)}⭐</b>\n"
+    text += (
+        "\n━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>Как пополнить:</b>\n\n"
+        "🔹 <b>Через админа (сейчас):</b>\n"
+        "  Напиши @admin — он зачислит на баланс\n\n"
+        "🔹 <b>Через Telegram Stars (скоро):</b>\n"
+        "  Прямая оплата в боте, картой или звёздами\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>Зачем нужен баланс:</b>\n"
+        "  • Скачивание треков — списывается цена\n"
+        "  • Распознавание музыки — списывается цена\n"
+        "  • Кэш — повторные скачивания <b>бесплатно</b>\n\n"
+        "💡 <b>Выгоднее подписка:</b> /sub — безлимит на всё"
+    )
+    await message.answer(text)

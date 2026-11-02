@@ -7,7 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from database import postgres_db as db
-from keyboards.admin import admin_menu, back_kb, balance_kb, billing_kb, prices_kb
+from keyboards.admin import withdrawal_kb, withdrawal_help_kb, admin_menu, back_kb, balance_kb, billing_kb, prices_kb
 from states import AdminBillingStates
 from utils.checks import is_admin
 
@@ -233,3 +233,176 @@ async def msg_bal_custom(message: Message, state: FSMContext) -> None:
         f"{'+' if amount >= 0 else ''}{amount}⭐ → <code>{uid}</code>\nБаланс: <b>{new_bal}⭐</b>",
         reply_markup=admin_menu(),
     )
+
+# ============================================================
+# WITHDRAWAL (вывод средств)
+# ============================================================
+
+@router.callback_query(F.data == "adm:withdrawal")
+async def cb_withdrawal(call: CallbackQuery) -> None:
+    if not await _guard_cb(call):
+        return
+    stats = await db.get_withdrawal_stats()
+    history = await db.get_withdrawals(limit=5)
+    text = (
+        "📤 <b>Вывод средств</b>\n\n"
+        f"💵 Всего заработано: <b>{stats['total_income']}⭐</b>\n"
+        f"  ├ подписки: {stats['subs_income']}⭐\n"
+        f"  └ пополнения: {stats['topup_income']}⭐\n\n"
+        f"👥 На балансах юзеров: <b>{stats['on_balances']}⭐</b>\n"
+        f"  <i>(обязательства перед юзерами — нельзя выводить)</i>\n\n"
+        f"📤 Уже выведено: <b>{stats['withdrawn']}⭐</b>\n\n"
+        f"✅ <b>Доступно к выводу: {stats['available']}⭐</b>\n"
+    )
+    if history:
+        text += "\n📜 <b>Последние выводы:</b>\n"
+        for w in history:
+            note = f" · {w['note']}" if w['note'] else ""
+            text += f"  • {w['amount']}⭐{note} · {w['created_at'].strftime('%d.%m.%Y')}\n"
+    try:
+        await call.message.edit_text(text, reply_markup=withdrawal_kb(stats, bool(history)))
+    except Exception:
+        await call.message.answer(text, reply_markup=withdrawal_kb(stats, bool(history)))
+    await call.answer()
+
+
+@router.callback_query(F.data == "adm:wd_help")
+async def cb_wd_help(call: CallbackQuery) -> None:
+    if not await _guard_cb(call):
+        return
+    text = (
+        "📖 <b>Как вывести Stars</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>Шаг 1.</b> Открой @BotFather\n\n"
+        "<b>Шаг 2.</b> /mybots → выбери своего бота\n\n"
+        "<b>Шаг 3.</b> Нажми <b>Payments</b>\n\n"
+        "<b>Шаг 4.</b> Нажми <b>Stars</b> → <b>Withdraw</b>\n\n"
+        "<b>Шаг 5.</b> Укажи сумму и кошелёк TON (Fragment)\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>Условия Telegram:</b>\n"
+        "• Минимум: <b>1000⭐</b> за один вывод\n"
+        "• Комиссия: 0%\n"
+        "• Срок: до <b>21 дня</b>\n"
+        "• Куда: кошелёк TON\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>Как это работает:</b>\n"
+        "1. Юзеры платят ⭐ → они в кошельке бота (в Telegram)\n"
+        "2. Бот показывает сколько «свободно» (заработано − на балансах − уже выведено)\n"
+        "3. Ты выводишь через @BotFather\n"
+        "4. Возвращаешься в бот → <b>📝 Записать вывод</b> → вводишь сумму\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>Где взять кошелёк TON:</b>\n"
+        "• <b>@wallet</b> в Telegram\n"
+        "• Fragment.com\n"
+        "• Любой TON-кошелёк\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>Важно:</b>\n"
+        "⚠️ Не выводи «на балансах юзеров» — они ещё могут потратить\n"
+        "⚠️ Telegram не даёт вывести < 1000⭐\n"
+        "⚠️ Комиссия сети TON оплачивается с кошелька"
+    )
+    try:
+        await call.message.edit_text(text, reply_markup=withdrawal_help_kb())
+    except Exception:
+        await call.message.answer(text, reply_markup=withdrawal_help_kb())
+    await call.answer()
+
+
+@router.callback_query(F.data == "adm:wd_add")
+async def cb_wd_add(call: CallbackQuery, state: FSMContext) -> None:
+    if not await _guard_cb(call):
+        return
+    stats = await db.get_withdrawal_stats()
+    if stats['available'] <= 0:
+        await call.answer("Нечего выводить — доступно 0⭐", show_alert=True)
+        return
+    await state.set_state(AdminBillingStates.withdraw_amount)
+    await call.message.answer(
+        f"📝 <b>Запись о выводе</b>\n\n"
+        f"Доступно: <b>{stats['available']}⭐</b>\n"
+        f"Минимум для реального вывода: 1000⭐\n\n"
+        f"Сколько вывел (в ⭐)?\n/cancel — отмена"
+    )
+    await call.answer()
+
+
+@router.message(AdminBillingStates.withdraw_amount)
+async def msg_wd_amount(message: Message, state: FSMContext) -> None:
+    if not await _guard_msg(message):
+        return
+    raw = (message.text or "").strip()
+    if not raw.isdigit() or int(raw) <= 0:
+        await message.answer("Нужно положительное число.")
+        return
+    amount = int(raw)
+    stats = await db.get_withdrawal_stats()
+    if amount > stats['available']:
+        await message.answer(
+            f"⚠️ Слишком много. Доступно: <b>{stats['available']}⭐</b>"
+        )
+        return
+    await state.update_data(withdraw_amount=amount)
+    await state.set_state(AdminBillingStates.withdraw_note)
+    await message.answer(
+        f"📝 Сумма: <b>{amount}⭐</b>\n\nДобавь заметку (номер транзакции, дата, кошелёк) или /skip:"
+    )
+
+
+@router.message(AdminBillingStates.withdraw_note)
+async def msg_wd_note(message: Message, state: FSMContext) -> None:
+    if not await _guard_msg(message):
+        return
+    raw = (message.text or "").strip()
+    note = "" if raw == "/skip" else raw[:200]
+    data = await state.get_data()
+    amount = data.get("withdraw_amount", 0)
+    await state.clear()
+    await db.add_withdrawal(amount, note, message.from_user.id)
+    await message.answer(
+        f"✅ Записано: <b>{amount}⭐</b>"
+        + (f"\n📝 {note}" if note else ""),
+        reply_markup=admin_menu(),
+    )
+
+
+@router.callback_query(F.data == "adm:wd_history")
+async def cb_wd_history(call: CallbackQuery) -> None:
+    if not await _guard_cb(call):
+        return
+    history = await db.get_withdrawals(limit=50)
+    if not history:
+        await call.answer("История пуста", show_alert=True)
+        return
+    text = "📜 <b>История выводов</b>\n\n"
+    total = 0
+    for w in history:
+        note = f" · {w['note']}" if w['note'] else ""
+        text += f"• {w['amount']}⭐{note} · {w['created_at'].strftime('%d.%m.%Y %H:%M')}\n"
+        total += w['amount']
+    text += f"\n<b>Итого выведено: {total}⭐</b>"
+    try:
+        await call.message.edit_text(text, reply_markup=withdrawal_kb({}, True))
+    except Exception:
+        await call.message.answer(text, reply_markup=withdrawal_kb({}, True))
+    await call.answer()
+
+@router.callback_query(F.data == "adm:earnings")
+async def cb_earnings(call: CallbackQuery) -> None:
+    if not await _guard_cb(call):
+        return
+    stats = await db.get_withdrawal_stats()
+    text = (
+        "💵 <b>Заработок</b>\n\n"
+        f"📈 Всего заработано: <b>{stats['total_income']}⭐</b>\n"
+        f"  ├ подписки: {stats['subs_income']}⭐\n"
+        f"  └ пополнения: {stats['topup_income']}⭐\n\n"
+        f"👥 На балансах юзеров: <b>{stats['on_balances']}⭐</b>\n"
+        f"📤 Уже выведено: <b>{stats['withdrawn']}⭐</b>\n\n"
+        f"✅ <b>Доступно к выводу: {stats['available']}⭐</b>\n\n"
+        f"<i>Перейти к выводу:</i> /admin → 📤 Вывод"
+    )
+    try:
+        await call.message.edit_text(text, reply_markup=back_kb())
+    except Exception:
+        await call.message.answer(text, reply_markup=back_kb())
+    await call.answer()

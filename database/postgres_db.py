@@ -221,6 +221,15 @@ async def init_db():
                 PRIMARY KEY (user_id, usage_date, action)
             );
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS withdrawals (
+                id SERIAL PRIMARY KEY,
+                amount INTEGER NOT NULL,
+                note TEXT,
+                created_by BIGINT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
     logger.info("DB schema ready")
 
 
@@ -931,3 +940,53 @@ async def finalize_action(user_id: int, action_key: str, reason: str, price: int
     if reason == "pay_per_use" and price > 0:
         return await add_balance(user_id, -price, kind="charge", action=action_key)
     return await get_balance(user_id)
+
+# ============================================================
+# WITHDRAWALS (вывод средств админом)
+# ============================================================
+
+async def add_withdrawal(amount: int, note: str = "", created_by: int = None) -> int:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO withdrawals (amount, note, created_by)
+            VALUES ($1, $2, $3) RETURNING id
+        """, amount, note, created_by)
+    return row["id"]
+
+
+async def get_withdrawals(limit: int = 10) -> list:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT amount, note, created_at FROM withdrawals
+            ORDER BY created_at DESC LIMIT $1
+        """, limit)
+    return [dict(r) for r in rows]
+
+
+async def get_withdrawal_stats() -> dict:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        subs_income = await conn.fetchval(
+            "SELECT COALESCE(SUM(stars_paid),0) FROM payments"
+        ) or 0
+        topup_income = await conn.fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM transactions WHERE kind='topup'"
+        ) or 0
+        on_balances = await conn.fetchval(
+            "SELECT COALESCE(SUM(balance),0) FROM user_balances"
+        ) or 0
+        withdrawn = await conn.fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM withdrawals"
+        ) or 0
+    total_income = subs_income + topup_income
+    available = max(0, total_income - withdrawn - on_balances)
+    return {
+        "total_income": total_income,
+        "subs_income": subs_income,
+        "topup_income": topup_income,
+        "on_balances": on_balances,
+        "withdrawn": withdrawn,
+        "available": available,
+    }

@@ -154,6 +154,8 @@ async def init_db():
             ("trial", config.DEFAULT_TRIAL),
             ("ads_config", config.DEFAULT_ADS_CONFIG),
             ("download_limits", config.DEFAULT_DOWNLOAD_LIMITS),
+            ("action_prices", config.DEFAULT_ACTION_PRICES),
+            ("billing_mode", config.DEFAULT_BILLING_MODE),
         ]:
             exists = await conn.fetchval("SELECT 1 FROM settings WHERE key=$1", key)
             if not exists:
@@ -187,6 +189,37 @@ async def init_db():
                 given_at TIMESTAMPTZ DEFAULT NOW()
             );
             CREATE INDEX IF NOT EXISTS idx_user_features_user ON user_features(user_id);
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_balances (
+                user_id BIGINT PRIMARY KEY,
+                balance INTEGER NOT NULL DEFAULT 0,
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS transactions (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                amount INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                action TEXT,
+                note TEXT,
+                created_by BIGINT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_transactions_user ON transactions(user_id);
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS usage_counters (
+                user_id BIGINT NOT NULL,
+                usage_date DATE NOT NULL,
+                action TEXT NOT NULL,
+                count INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, usage_date, action)
+            );
         """)
     logger.info("DB schema ready")
 
@@ -763,3 +796,138 @@ async def clean_track_cache(mode: str) -> int:
         return int(res.split()[-1])
     except Exception:
         return 0
+
+async def get_action_prices() -> dict:
+    data = await get_setting("action_prices", config.DEFAULT_ACTION_PRICES)
+    if not isinstance(data, dict):
+        return config.DEFAULT_ACTION_PRICES
+    result = dict(config.DEFAULT_ACTION_PRICES)
+    result.update(data)
+    return result
+
+
+async def set_action_price(action_key: str, price: int):
+    prices = await get_action_prices()
+    prices[action_key] = price
+    await set_setting("action_prices", prices)
+
+
+async def get_billing_mode() -> dict:
+    data = await get_setting("billing_mode", config.DEFAULT_BILLING_MODE)
+    if not isinstance(data, dict):
+        return config.DEFAULT_BILLING_MODE
+    result = dict(config.DEFAULT_BILLING_MODE)
+    result.update(data)
+    return result
+
+
+async def set_billing_mode(**kwargs):
+    mode = await get_billing_mode()
+    for k, v in kwargs.items():
+        mode[k] = v
+    await set_setting("billing_mode", mode)
+
+
+async def get_balance(user_id: int) -> int:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT balance FROM user_balances WHERE user_id=$1", user_id)
+    return int(row["balance"]) if row else 0
+
+
+async def add_balance(user_id: int, amount: int, kind: str = "manual",
+                      action: str = None, note: str = None,
+                      created_by: int = None) -> int:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("""
+                INSERT INTO user_balances (user_id, balance) VALUES ($1, 0)
+                ON CONFLICT (user_id) DO NOTHING
+            """, user_id)
+            await conn.execute("""
+                UPDATE user_balances
+                SET balance = balance + $1, updated_at = NOW()
+                WHERE user_id = $2
+            """, amount, user_id)
+            new_balance = await conn.fetchval(
+                "SELECT balance FROM user_balances WHERE user_id=$1", user_id
+            )
+            await conn.execute("""
+                INSERT INTO transactions (user_id, amount, kind, action, note, created_by)
+                VALUES ($1, $2, $3, $4, $5, $6)
+            """, user_id, amount, kind, action, note, created_by)
+    return int(new_balance or 0)
+
+
+async def get_transactions(user_id: int, limit: int = 10) -> list:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT amount, kind, action, note, created_at
+            FROM transactions WHERE user_id=$1
+            ORDER BY created_at DESC LIMIT $2
+        """, user_id, limit)
+    return [dict(r) for r in rows]
+
+
+async def get_total_free_actions_used(user_id: int) -> int:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        val = await conn.fetchval("""
+            SELECT COALESCE(SUM(count),0) FROM usage_counters
+            WHERE user_id=$1 AND usage_date=CURRENT_DATE
+        """, user_id)
+    return int(val or 0)
+
+
+async def increment_free_action(user_id: int, action_key: str) -> int:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO usage_counters (user_id, usage_date, action, count)
+            VALUES ($1, CURRENT_DATE, $2, 1)
+            ON CONFLICT (user_id, usage_date, action) DO UPDATE
+            SET count = usage_counters.count + 1
+        """, user_id, action_key)
+        val = await conn.fetchval("""
+            SELECT count FROM usage_counters
+            WHERE user_id=$1 AND usage_date=CURRENT_DATE AND action=$2
+        """, user_id, action_key)
+    return int(val or 0)
+
+
+async def check_action_access(user_id: int, action_key: str):
+    if config.FREE_MODE:
+        return (True, "free_mode", 0, await get_balance(user_id))
+
+    mode = await get_billing_mode()
+    if mode.get("subscription_enabled") and await is_paid(user_id):
+        return (True, "subscription", 0, await get_balance(user_id))
+
+    free_limit = int(mode.get("free_actions_per_day", 0))
+    if free_limit > 0:
+        used = await get_total_free_actions_used(user_id)
+        if used < free_limit:
+            return (True, "free_quota", 0, await get_balance(user_id))
+
+    if mode.get("pay_per_use_enabled"):
+        prices = await get_action_prices()
+        price = int(prices.get(action_key, 0))
+        balance = await get_balance(user_id)
+        if price <= 0:
+            return (True, "pay_per_use", 0, balance)
+        if balance >= price:
+            return (True, "pay_per_use", price, balance)
+        return (False, "need_topup", price, balance)
+
+    return (False, "no_access", 0, await get_balance(user_id))
+
+
+async def finalize_action(user_id: int, action_key: str, reason: str, price: int) -> int:
+    if reason == "free_quota":
+        await increment_free_action(user_id, action_key)
+        return await get_balance(user_id)
+    if reason == "pay_per_use" and price > 0:
+        return await add_balance(user_id, -price, kind="charge", action=action_key)
+    return await get_balance(user_id)

@@ -58,3 +58,22 @@ CACHE_TTL_DAYS = {
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN not set in .env")
+
+# ==== Pay-per-use: цены за действия ====
+DEFAULT_ACTION_PRICES = {
+    "download_track": 5,
+    "recognize": 3,
+    "playlist_dl": 20,
+}
+
+DEFAULT_BILLING_MODE = {
+    "subscription_enabled": True,
+    "pay_per_use_enabled": True,
+    "free_actions_per_day": 3,
+}
+
+ACTION_KEYS = {
+    "download_track": "Скачать трек",
+    "recognize": "Распознать музыку",
+    "playlist_dl": "Скачать плейлист",
+}

@@ -6,8 +6,10 @@ from uuid import uuid4
 from aiogram import F, Router
 from aiogram.types import FSInputFile, Message
 
+from database import postgres_db as db
 from services.downloader import _sync_search_dl, TrackMeta, cleanup
 from services.recognize import recognize_file
+from utils.checks import is_banned
 
 router = Router(name="recognize")
 logger = logging.getLogger(__name__)
@@ -31,12 +33,37 @@ async def btn_recognize(message: Message) -> None:
 
 @router.message(F.voice | F.audio | F.video_note | F.video)
 async def handle_voice(message: Message) -> None:
+    if await is_banned(message.from_user.id):
+        await message.answer("⛔ Вы заблокированы.")
+        return
+
     lock = _get_lock(message.from_user.id)
     if lock.locked():
         await message.answer("⏳ Уже слушаю. Дождись.")
         return
 
     async with lock:
+        ok, reason, price, balance = await db.check_action_access(
+            message.from_user.id, "recognize"
+        )
+        if not ok:
+            if reason == "need_topup":
+                await message.answer(
+                    f"💳 <b>Недостаточно средств</b>\n\n"
+                    f"Распознавание: <b>{price}⭐</b>\n"
+                    f"Баланс: <b>{balance}⭐</b>\n"
+                    f"Не хватает: <b>{price - balance}⭐</b>\n\n"
+                    f"Пополнить: /balance"
+                )
+            else:
+                await message.answer(
+                    "❌ <b>Нет доступа</b>\n\n"
+                    "• 💎 Подписка: /sub\n"
+                    "• 🎁 Триал: /trial\n"
+                    "• 💳 Баланс: /balance"
+                )
+            return
+
         status = await message.answer("🎧 Слушаю...")
         tmp_dir = Path("downloads")
         tmp_dir.mkdir(exist_ok=True)
@@ -63,8 +90,8 @@ async def handle_voice(message: Message) -> None:
             info = await recognize_file(tmp_path)
             if not info or not info.get("title"):
                 await status.edit_text(
-                    "❌ Не удалось распознать. Попробуй фрагмент подлиннее (10-15 сек) "
-                    "или пришли ссылку на трек."
+                    "❌ Не удалось распознать.\n\n"
+                    "💳 Списание НЕ произведено."
                 )
                 return
 
@@ -75,6 +102,9 @@ async def handle_voice(message: Message) -> None:
             meta = TrackMeta(title=title, artist=artist)
             q = f"ytsearch5:{artist} {title}" if artist else f"ytsearch5:{title}"
             result = await asyncio.to_thread(_sync_search_dl, q, meta, "mp3_320", False)
+
+            new_bal = await db.finalize_action(message.from_user.id, "recognize", reason, price)
+
             audio = FSInputFile(str(result.filepath), filename=result.filepath.name)
             await message.answer_audio(
                 audio=audio,
@@ -86,11 +116,18 @@ async def handle_voice(message: Message) -> None:
                 await status.delete()
             except Exception:
                 pass
+
+            if reason == "pay_per_use" and price > 0:
+                try:
+                    await message.answer(f"💳 -{price}⭐ · Баланс: {new_bal}⭐")
+                except Exception:
+                    pass
+
             cleanup(result.filepath)
         except Exception as e:
             logger.exception("recognize handler failed")
             try:
-                await status.edit_text(f"❌ Ошибка: {e}")
+                await status.edit_text(f"❌ Ошибка: {e}\n\n💳 Списание НЕ произведено.")
             except Exception:
                 pass
         finally:

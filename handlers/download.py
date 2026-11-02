@@ -11,6 +11,8 @@ from config import MAX_PLAYLIST_TRACKS
 from database.cache import get_cached, save_cached
 from services.downloader import cleanup, download_audio, _sync_search_dl, TrackMeta
 from services.platforms import Platform, detect_platform
+from database import postgres_db as db
+
 from services.playlist import parse_spotify_playlist
 from utils.urls import url_hash
 
@@ -118,6 +120,7 @@ async def _process_spotify_playlist(message: Message, url: str, status: Message)
             q = f"ytsearch5:{meta.artist} {meta.title}" if meta.artist else f"ytsearch5:{meta.title}"
             result = await asyncio.to_thread(_sync_search_dl, q, meta, "mp3_320", True)
             audio = FSInputFile(str(result.filepath), filename=result.filepath.name)
+            await db.finalize_action(message.from_user.id, "download_track", reason, price)
             file_id = await _send_audio_safe(
                 message,
                 audio=audio,
@@ -176,6 +179,7 @@ async def _process_ytdlp_playlist(message: Message, url: str, status: Message) -
                 continue
             result = await download_audio(track_url)
             audio = FSInputFile(str(result.filepath), filename=result.filepath.name)
+            await db.finalize_action(message.from_user.id, "download_track", reason, price)
             file_id = await _send_audio_safe(
                 message,
                 audio=audio,
@@ -206,6 +210,28 @@ async def handle_url(message: Message) -> None:
             "❌ Неизвестная платформа.\n"
             "Поддерживаются: Spotify, SoundCloud, Яндекс.Музыка, YouTube, Bandcamp, VK."
         )
+        return
+
+    # Pay-per-use: проверка доступа БЕЗ списания
+    ok, reason, price, balance = await db.check_action_access(
+        message.from_user.id, "download_track"
+    )
+    if not ok:
+        if reason == "need_topup":
+            await message.answer(
+                f"💳 <b>Недостаточно средств</b>\n\n"
+                f"Стоимость: <b>{price}⭐</b>\n"
+                f"Твой баланс: <b>{balance}⭐</b>\n"
+                f"Не хватает: <b>{price - balance}⭐</b>\n\n"
+                f"Пополнить: /balance"
+            )
+        else:
+            await message.answer(
+                "❌ <b>Нет доступа</b>\n\n"
+                "• 💎 Подписка: /sub\n"
+                "• 🎁 Триал: /trial\n"
+                "• 💳 Баланс: /balance"
+            )
         return
 
     lock = _get_lock(message.from_user.id)

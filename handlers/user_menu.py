@@ -726,7 +726,8 @@ async def _do_lyrics(message: Message, query: str) -> None:
 
 @router.message(F.text == "🏠 Меню")
 @router.message(Command("menu"))
-async def btn_main_menu(message: Message) -> None:
+async def btn_main_menu(message: Message, state: FSMContext) -> None:
+    await state.clear()
     if await is_banned(message.from_user.id):
         return
     admin = await is_admin(message.from_user.id)
@@ -738,7 +739,8 @@ async def btn_main_menu(message: Message) -> None:
 
 
 @router.callback_query(F.data == "user:menu")
-async def cb_main_menu(call: CallbackQuery) -> None:
+async def cb_main_menu(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
     if await is_banned(call.from_user.id):
         return
     admin = await is_admin(call.from_user.id)

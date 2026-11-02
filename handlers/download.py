@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 
 from aiogram import F, Router
@@ -62,7 +63,15 @@ async def handle_url(message: Message) -> None:
                 pass
         except Exception as e:
             logger.exception("download error")
-            await status.edit_text(f"❌ Не удалось скачать: {e}")
+            safe = html.escape(str(e))[:500]
+            try:
+                await status.edit_text(f"❌ Не удалось скачать: {safe}")
+            except Exception:
+                # если и тут не получилось - шлём plain
+                try:
+                    await message.answer(f"❌ Не удалось скачать: {safe}", parse_mode=None)
+                except Exception:
+                    pass
         finally:
             if result and result.filepath:
                 cleanup(result.filepath)

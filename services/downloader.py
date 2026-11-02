@@ -24,6 +24,7 @@ DOWNLOAD_DIR.mkdir(exist_ok=True)
 FFMPEG_LOCATION = os.getenv("FFMPEG_LOCATION", "").strip() or None
 SPOTIFY_OEMBED = "https://open.spotify.com/oembed"
 SPOTIFY_EMBED = "https://open.spotify.com/embed/track/{id}"
+ITUNES_SEARCH = "https://itunes.apple.com/search"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 MIN_MATCH_SCORE = 4
 
@@ -45,9 +46,9 @@ class DownloadResult:
     platform: str = "unknown"
 
 
-def _parse_json_ld(html):
+def _parse_json_ld(html_text):
     meta = TrackMeta()
-    for m in re.finditer(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL):
+    for m in re.finditer(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', html_text, re.DOTALL):
         try:
             data = json.loads(m.group(1).strip())
         except Exception:
@@ -80,12 +81,12 @@ def _parse_json_ld(html):
     return meta
 
 
-def _parse_og(html):
+def _parse_og(html_text):
     meta = TrackMeta()
-    m = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', html)
+    m = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', html_text)
     if m:
         meta.title = m.group(1).strip()
-    m = re.search(r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']', html)
+    m = re.search(r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']', html_text)
     if m:
         desc = m.group(1).strip()
         for sep in [" · ", " — ", " – ", " - "]:
@@ -105,16 +106,15 @@ async def _fetch_page_meta(url):
         async with httpx.AsyncClient(timeout=20, headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9,ru;q=0.8"}, follow_redirects=True) as c:
             r = await c.get(url)
             if r.status_code != 200:
-                logger.warning("Page %s -> %s", url, r.status_code)
                 return TrackMeta()
-            html = r.text
+            html_text = r.text
     except Exception as e:
         logger.warning("Page fetch failed: %s", e)
         return TrackMeta()
-    ld = _parse_json_ld(html)
+    ld = _parse_json_ld(html_text)
     if ld.title and ld.artist:
         return ld
-    og = _parse_og(html)
+    og = _parse_og(html_text)
     if not ld.title:
         ld.title = og.title
     if not ld.artist:
@@ -123,7 +123,6 @@ async def _fetch_page_meta(url):
 
 
 async def _spotify_embed_meta(url):
-    """open.spotify.com/embed/track/{id} - JSON с title, subtitle (artist), duration (ms)."""
     m = re.search(r"/track/([a-zA-Z0-9]+)", url)
     if not m:
         return TrackMeta(source="spotify")
@@ -133,54 +132,114 @@ async def _spotify_embed_meta(url):
         async with httpx.AsyncClient(timeout=20, headers={"User-Agent": UA}, follow_redirects=True) as c:
             r = await c.get(embed_url)
             if r.status_code != 200:
-                logger.warning("Spotify embed %s -> %s", track_id, r.status_code)
                 return TrackMeta(source="spotify")
-            html = r.text
+            html_text = r.text
     except Exception as e:
-        logger.warning("Spotify embed fetch failed: %s", e)
+        logger.warning("Spotify embed failed: %s", e)
         return TrackMeta(source="spotify")
 
     meta = TrackMeta(source="spotify")
-    m = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', html)
+    m = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', html_text)
     if m:
         try:
             meta.title = json.loads('"' + m.group(1) + '"')
         except Exception:
             meta.title = m.group(1)
-    m = re.search(r'"subtitle"\s*:\s*"((?:[^"\\]|\\.)*)"', html)
+    m = re.search(r'"subtitle"\s*:\s*"((?:[^"\\]|\\.)*)"', html_text)
     if m:
         try:
             meta.artist = json.loads('"' + m.group(1) + '"')
         except Exception:
             meta.artist = m.group(1)
-    m = re.search(r'"duration"\s*:\s*(\d+)', html)
+    m = re.search(r'"duration"\s*:\s*(\d+)', html_text)
     if m:
         meta.duration = int(m.group(1)) // 1000
     return meta
 
 
+async def _itunes_meta(query):
+    """iTunes Search API - бесплатный, без ключа, отдаёт artist+title+duration."""
+    if not query:
+        return TrackMeta(source="itunes")
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.get(
+                ITUNES_SEARCH,
+                params={"term": query, "media": "music", "limit": 5},
+            )
+            if r.status_code != 200:
+                logger.warning("iTunes %s -> %s", query, r.status_code)
+                return TrackMeta(source="itunes")
+            data = r.json()
+    except Exception as e:
+        logger.warning("iTunes failed: %s", e)
+        return TrackMeta(source="itunes")
+
+    results = data.get("results") or []
+    if not results:
+        return TrackMeta(source="itunes")
+
+    # скоринг по совпадению с query
+    q_low = query.lower()
+
+    def _s(r):
+        s = 0
+        t = (r.get("trackName") or "").lower()
+        a = (r.get("artistName") or "").lower()
+        if t and t in q_low:
+            s += 3
+        if a and a in q_low:
+            s += 3
+        if q_low and q_low in f"{a} {t}":
+            s += 2
+        return s
+
+    results.sort(key=_s, reverse=True)
+    first = results[0]
+    return TrackMeta(
+        artist=first.get("artistName", "") or "",
+        title=first.get("trackName", "") or "",
+        duration=int((first.get("trackTimeMillis") or 0) // 1000),
+        source="itunes",
+    )
+
+
 async def _spotify_meta(url):
+    # 1) embed
     meta = await _spotify_embed_meta(url)
     if meta.title and meta.artist:
         logger.info("Spotify embed OK: artist=%r title=%r dur=%d", meta.artist, meta.title, meta.duration)
         return meta
 
-    try:
-        async with httpx.AsyncClient(timeout=15) as c:
-            r = await c.get(SPOTIFY_OEMBED, params={"url": url})
-            if r.status_code == 200 and not meta.title:
-                meta.title = (r.json().get("title") or "").strip()
-    except Exception as e:
-        logger.warning("Spotify oEmbed failed: %s", e)
+    # 2) oEmbed title
+    if not meta.title:
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.get(SPOTIFY_OEMBED, params={"url": url})
+                if r.status_code == 200:
+                    meta.title = (r.json().get("title") or "").strip()
+        except Exception as e:
+            logger.warning("Spotify oEmbed failed: %s", e)
 
-    page = await _fetch_page_meta(url)
-    if page.title and not meta.title:
-        meta.title = page.title
-    if page.artist and not meta.artist:
-        meta.artist = page.artist
-    if page.duration and not meta.duration:
-        meta.duration = page.duration
-    logger.info("Spotify fallback meta: artist=%r title=%r dur=%d", meta.artist, meta.title, meta.duration)
+    # 3) iTunes поиск по title
+    if meta.title and not meta.artist:
+        it = await _itunes_meta(meta.title)
+        if it.artist:
+            logger.info("iTunes enriched: artist=%r title=%r dur=%d", it.artist, it.title, it.duration)
+            # сохраняем наш title (он точный из Spotify), берём artist + duration из iTunes
+            meta.artist = it.artist
+            if it.duration and not meta.duration:
+                meta.duration = it.duration
+
+    # 4) page fallback
+    if not meta.artist:
+        page = await _fetch_page_meta(url)
+        if page.artist and not meta.artist:
+            meta.artist = page.artist
+        if page.duration and not meta.duration:
+            meta.duration = page.duration
+
+    logger.info("Spotify final: artist=%r title=%r dur=%d src=%s", meta.artist, meta.title, meta.duration, meta.source)
     return meta
 
 
@@ -235,8 +294,8 @@ def _sync_search_dl(query, meta, fmt, strict):
 
     if strict and best_score < MIN_MATCH_SCORE:
         raise RuntimeError(
-            f"Не нашёл точного совпадения (score {best_score} < {MIN_MATCH_SCORE}). "
-            "Пришли ссылку на SoundCloud или YouTube — скачаю напрямую."
+            f"Не нашёл точного совпадения (score {best_score}, нужно {MIN_MATCH_SCORE}). "
+            "Попробуй прислать ссылку на SoundCloud или YouTube."
         )
 
     best_url = best.get("webpage_url") or best.get("url")

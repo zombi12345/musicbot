@@ -7,13 +7,22 @@ import yt_dlp
 from aiogram import F, Router
 from aiogram.types import FSInputFile, Message
 
+import config
 from config import MAX_PLAYLIST_TRACKS
-from database.cache import get_cached, save_cached
-from services.downloader import cleanup, download_audio, _sync_search_dl, TrackMeta
-from services.platforms import Platform, detect_platform
 from database import postgres_db as db
-
-from services.playlist import parse_spotify_playlist, parse_soundcloud_playlist, parse_yandex_album
+from database.cache import get_cached, save_cached
+from services.downloader import (
+    TrackMeta,
+    _sync_search_dl,
+    cleanup,
+    download_audio,
+)
+from services.platforms import Platform, detect_platform
+from services.playlist import (
+    parse_spotify_playlist,
+    parse_soundcloud_playlist,
+    parse_yandex_album,
+)
 from utils.urls import url_hash
 
 router = Router(name="download")
@@ -29,6 +38,7 @@ PLATFORM_LABEL = {
 PLAYLIST_PATTERNS = [
     r"/playlist/",
     r"/album/",
+    r"on\.soundcloud\.com/",
     r"soundcloud\.com/[^/]+/sets/",
     r"[?&]list=",
 ]
@@ -46,14 +56,19 @@ def _is_playlist(url: str) -> bool:
     return any(re.search(p, url) for p in PLAYLIST_PATTERNS)
 
 
-async def _send_audio_safe(message: Message, **kwargs) -> str | None:
+async def _send_audio_safe(message: Message, **kwargs):
     sent = await message.answer_audio(**kwargs)
     if sent and sent.audio:
         return sent.audio.file_id
     return None
 
 
+# ============================================================
+# SINGLE TRACK
+# ============================================================
+
 async def _process_single(message: Message, url: str, status: Message) -> None:
+    uid = message.from_user.id
     h = url_hash(url)
     cached = await get_cached(h)
     if cached:
@@ -81,6 +96,12 @@ async def _process_single(message: Message, url: str, status: Message) -> None:
     )
     if file_id:
         await save_cached(h, url, result.platform, result.title, result.performer, result.duration, file_id)
+        try:
+            await db.add_download_history(
+                uid, url, result.title, result.performer, result.platform, None
+            )
+        except Exception:
+            pass
     try:
         await status.delete()
     except Exception:
@@ -88,61 +109,67 @@ async def _process_single(message: Message, url: str, status: Message) -> None:
     cleanup(result.filepath)
 
 
-async def _process_spotify_playlist(message: Message, url: str, status: Message) -> None:
-    playlist = await parse_spotify_playlist(url, max_tracks=MAX_PLAYLIST_TRACKS)
-    if not playlist or not playlist.tracks:
-        raise RuntimeError(
-            "Не удалось разобрать плейлист/альбом Spotify. Возможно, он приватный. "
-            "Пришли ссылки на треки по одной."
+# ============================================================
+# PLAYLISTS (free, no finalize)
+# ============================================================
+
+async def _send_playlist_track(message: Message, i: int, total: int, track) -> bool:
+    """Скачивает один трек из плейлиста. True если отправлен."""
+    try:
+        key_url = track.url or f"search:{track.artist} {track.name}"
+        h = url_hash(key_url)
+        cached = await get_cached(h)
+        if cached:
+            await message.answer_audio(
+                audio=cached["file_id"],
+                title=cached["title"] or None,
+                performer=cached["performer"] or None,
+                duration=cached["duration"] or None,
+            )
+            return True
+
+        meta = TrackMeta(title=track.name, artist=track.artist, duration=track.duration)
+        q = f"ytsearch5:{meta.artist} {meta.title}" if meta.artist else f"ytsearch5:{meta.title}"
+        result = await asyncio.to_thread(_sync_search_dl, q, meta, "mp3_320", True)
+        audio = FSInputFile(str(result.filepath), filename=result.filepath.name)
+        file_id = await _send_audio_safe(
+            message,
+            audio=audio,
+            title=result.title or None,
+            performer=result.performer or None,
+            duration=result.duration or None,
         )
+        if file_id:
+            await save_cached(h, key_url, "playlist", result.title, result.performer, result.duration, file_id)
+        cleanup(result.filepath)
+        return True
+    except Exception as e:
+        logger.exception("playlist track %d failed", i)
+        try:
+            await message.answer(f"❌ {i}. {html.escape(str(track.name))}: {html.escape(str(e))[:100]}")
+        except Exception:
+            pass
+        return False
+
+
+async def _process_parsed_playlist(message: Message, playlist, status: Message) -> None:
+    if not playlist or not getattr(playlist, "tracks", None):
+        raise RuntimeError("Пустой плейлист")
     total = len(playlist.tracks)
     sent = 0
     for i, track in enumerate(playlist.tracks, 1):
         try:
             await status.edit_text(
-                f"📋 <b>{playlist.title}</b>\n"
-                f"Скачиваю {i}/{total}: {track.artist} — {track.name}"
+                f"📋 <b>{html.escape(playlist.title)}</b>\n"
+                f"Скачиваю {i}/{total}\n"
+                f"<i>{html.escape(track.artist)} — {html.escape(track.name)}</i>"
             )
-            key_url = track.url or f"spotify_search:{track.artist} {track.name}"
-            h = url_hash(key_url)
-            cached = await get_cached(h)
-            if cached:
-                await message.answer_audio(
-                    audio=cached["file_id"],
-                    title=cached["title"] or None,
-                    performer=cached["performer"] or None,
-                    duration=cached["duration"] or None,
-                )
-                sent += 1
-                continue
-
-            meta = TrackMeta(title=track.name, artist=track.artist, duration=track.duration)
-            q = f"ytsearch5:{meta.artist} {meta.title}" if meta.artist else f"ytsearch5:{meta.title}"
-            result = await asyncio.to_thread(_sync_search_dl, q, meta, "mp3_320", True)
-            audio = FSInputFile(str(result.filepath), filename=result.filepath.name)
-            await db.finalize_action(message.from_user.id, "download_track", reason, price)
-            try:
-                await db.add_download_history(
-                    message.from_user.id, url, result.title, result.performer, result.platform, None
-                )
-            except Exception:
-                pass
-            file_id = await _send_audio_safe(
-                message,
-                audio=audio,
-                title=result.title or None,
-                performer=result.performer or None,
-                duration=result.duration or None,
-            )
-            if file_id:
-                await save_cached(h, key_url, "spotify", result.title, result.performer, result.duration, file_id)
-            cleanup(result.filepath)
+        except Exception:
+            pass
+        if await _send_playlist_track(message, i, total, track):
             sent += 1
-        except Exception as e:
-            logger.exception("playlist track %d failed", i)
-            await message.answer(f"❌ {i}. {track.artist} — {track.name}: {html.escape(str(e))[:200]}")
     try:
-        await status.edit_text(f"✅ <b>{playlist.title}</b> — готово: {sent}/{total}")
+        await status.edit_text(f"✅ <b>{html.escape(playlist.title)}</b>\nГотово: {sent}/{total}")
     except Exception:
         pass
 
@@ -152,62 +179,8 @@ def _probe_playlist(url: str) -> dict:
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
         if not info:
-            raise RuntimeError("yt-dlp не смог обработать эту ссылку")
+            raise RuntimeError("yt-dlp не смог обработать ссылку")
         return info
-
-
-
-
-async def _process_yandex_playlist(message: Message, url: str, status: Message) -> None:
-    playlist = await parse_yandex_album(url, max_tracks=MAX_PLAYLIST_TRACKS)
-    if not playlist or not playlist.tracks:
-        raise RuntimeError(
-            "Не удалось разобрать альбом/плейлист Яндекс.Музыки.\n\n"
-            "Возможно, он приватный или содержит только превью."
-        )
-    total = len(playlist.tracks)
-    sent = 0
-    for i, track in enumerate(playlist.tracks, 1):
-        try:
-            await status.edit_text(
-                f"📋 <b>{playlist.title}</b>\n"
-                f"Скачиваю {i}/{total}: {track.artist} — {track.name}"
-            )
-            key_url = f"yandex_search:{track.artist} {track.name}"
-            h = url_hash(key_url)
-            cached = await get_cached(h)
-            if cached:
-                await message.answer_audio(
-                    audio=cached["file_id"],
-                    title=cached["title"] or None,
-                    performer=cached["performer"] or None,
-                    duration=cached["duration"] or None,
-                )
-                sent += 1
-                continue
-
-            meta = TrackMeta(title=track.name, artist=track.artist, duration=track.duration)
-            q = f"ytsearch5:{meta.artist} {meta.title}" if meta.artist else f"ytsearch5:{meta.title}"
-            result = await asyncio.to_thread(_sync_search_dl, q, meta, "mp3_320", True)
-            audio = FSInputFile(str(result.filepath), filename=result.filepath.name)
-            file_id = await _send_audio_safe(
-                message,
-                audio=audio,
-                title=result.title or None,
-                performer=result.performer or None,
-                duration=result.duration or None,
-            )
-            if file_id:
-                await save_cached(h, key_url, "yandex", result.title, result.performer, result.duration, file_id)
-            cleanup(result.filepath)
-            sent += 1
-        except Exception as e:
-            logger.exception("yandex playlist track %d failed", i)
-            await message.answer(f"❌ {i}. {track.artist} — {track.name}: {html.escape(str(e))[:200]}")
-    try:
-        await status.edit_text(f"✅ <b>{playlist.title}</b> — готово: {sent}/{total}")
-    except Exception:
-        pass
 
 
 async def _process_ytdlp_playlist(message: Message, url: str, status: Message) -> None:
@@ -225,13 +198,17 @@ async def _process_ytdlp_playlist(message: Message, url: str, status: Message) -
     for i, entry in enumerate(entries, 1):
         try:
             await status.edit_text(
-                f"📋 <b>{title}</b>\n"
-                f"Скачиваю {i}/{total}: {entry.get('title', '?')}"
+                f"📋 <b>{html.escape(str(title)[:100])}</b>\n"
+                f"Скачиваю {i}/{total}\n"
+                f"<i>{html.escape(str(entry.get('title', '?'))[:100])}</i>"
             )
-            track_url = entry.get("webpage_url") or entry["url"]
-            h = url_hash(track_url)
-            cached = await get_cached(h)
-            if cached:
+        except Exception:
+            pass
+        track_url = entry.get("webpage_url") or entry["url"]
+        h = url_hash(track_url)
+        cached = await get_cached(h)
+        if cached:
+            try:
                 await message.answer_audio(
                     audio=cached["file_id"],
                     title=cached["title"] or None,
@@ -239,16 +216,12 @@ async def _process_ytdlp_playlist(message: Message, url: str, status: Message) -
                     duration=cached["duration"] or None,
                 )
                 sent += 1
-                continue
-            result = await download_audio(track_url)
-            audio = FSInputFile(str(result.filepath), filename=result.filepath.name)
-            await db.finalize_action(message.from_user.id, "download_track", reason, price)
-            try:
-                await db.add_download_history(
-                    message.from_user.id, url, result.title, result.performer, result.platform, None
-                )
             except Exception:
                 pass
+            continue
+        try:
+            result = await download_audio(track_url)
+            audio = FSInputFile(str(result.filepath), filename=result.filepath.name)
             file_id = await _send_audio_safe(
                 message,
                 audio=audio,
@@ -262,12 +235,19 @@ async def _process_ytdlp_playlist(message: Message, url: str, status: Message) -
             sent += 1
         except Exception as e:
             logger.exception("ytdlp playlist track %d failed", i)
-            await message.answer(f"❌ {i}. {entry.get('title', '?')}: {html.escape(str(e))[:200]}")
+            try:
+                await message.answer(f"❌ {i}. {html.escape(str(e))[:100]}")
+            except Exception:
+                pass
     try:
-        await status.edit_text(f"✅ <b>{title}</b> — готово: {sent}/{total}")
+        await status.edit_text(f"✅ <b>{html.escape(str(title)[:100])}</b>\nГотово: {sent}/{total}")
     except Exception:
         pass
 
+
+# ============================================================
+# MAIN HANDLER
+# ============================================================
 
 @router.message(F.text.regexp(r"^https?://\S+"))
 async def handle_url(message: Message) -> None:
@@ -277,60 +257,82 @@ async def handle_url(message: Message) -> None:
     if platform == Platform.UNKNOWN:
         await message.answer(
             "❌ Неизвестная платформа.\n"
-            "Поддерживаются: Spotify, SoundCloud, Яндекс.Музыка, YouTube, Bandcamp, VK."
+            "Поддерживаются: Spotify, SoundCloud, Яндекс, YouTube, Bandcamp, VK."
         )
         return
 
-    # Pay-per-use: проверка доступа БЕЗ списания
-    ok, reason, price, balance = await db.check_action_access(
-        message.from_user.id, "download_track"
-    )
-    if not ok:
-        if reason == "need_topup":
-            await message.answer(
-                f"💳 <b>Недостаточно средств</b>\n\n"
-                f"Стоимость: <b>{price}⭐</b>\n"
-                f"Твой баланс: <b>{balance}⭐</b>\n"
-                f"Не хватает: <b>{price - balance}⭐</b>\n\n"
-                f"Пополнить: /balance"
-            )
-        else:
-            await message.answer(
-                "❌ <b>Нет доступа</b>\n\n"
-                "• 💎 Подписка: /sub\n"
-                "• 🎁 Триал: /trial\n"
-                "• 💳 Баланс: /balance"
-            )
-        return
-
-    lock = _get_lock(message.from_user.id)
+    uid = message.from_user.id
+    lock = _get_lock(uid)
     if lock.locked():
         await message.answer("⏳ Уже идёт обработка. Дождись.")
         return
 
     async with lock:
+        is_pl = _is_playlist(url)
         label = PLATFORM_LABEL.get(platform, platform.value)
-        status = await message.answer(f"⏳ Обрабатываю {label}...")
+
+        # Pay-per-use: только для одиночных треков
+        reason = "free_mode"
+        price = 0
+        if not is_pl:
+            ok, reason, price, balance = await db.check_action_access(uid, "download_track")
+            if not ok:
+                if reason == "need_topup":
+                    await message.answer(
+                        f"💳 <b>Недостаточно средств</b>\n\n"
+                        f"Стоимость: <b>{price}⭐</b>\n"
+                        f"Баланс: <b>{balance}⭐</b>\n"
+                        f"Не хватает: <b>{price - balance}⭐</b>\n\n"
+                        f"Пополнить: /balance"
+                    )
+                else:
+                    await message.answer(
+                        "❌ <b>Нет доступа</b>\n\n"
+                        "• 💎 Подписка: /sub\n"
+                        "• 🎁 Триал: /trial\n"
+                        "• 💳 Баланс: /balance"
+                    )
+                return
+
+        action = "плейлист" if is_pl else "трек"
+        status = await message.answer(f"⏳ Обрабатываю {action} с {label}...")
+
         try:
-            if _is_playlist(url):
+            if is_pl:
                 if platform == Platform.SPOTIFY:
-                    await _process_spotify_playlist(message, url, status)
+                    playlist = await parse_spotify_playlist(url, max_tracks=MAX_PLAYLIST_TRACKS)
+                    if not playlist:
+                        raise RuntimeError(
+                            "Не удалось найти альбом на Deezer.\n"
+                            "Пришли ссылки на треки по одной."
+                        )
+                    await _process_parsed_playlist(message, playlist, status)
                 elif platform == Platform.YANDEX:
-                    # Сначала yt-dlp (умеет YandexMusic extractor), fallback на HTML
-                    try:
+                    playlist = await parse_yandex_album(url, max_tracks=MAX_PLAYLIST_TRACKS)
+                    if not playlist:
+                        # Fallback: yt-dlp напрямую
                         await _process_ytdlp_playlist(message, url, status)
-                    except Exception as e:
-                        logger.warning("yandex yt-dlp failed: %s, fallback HTML", e)
-                        await _process_yandex_playlist(message, url, status)
+                    else:
+                        await _process_parsed_playlist(message, playlist, status)
+                elif platform == Platform.SOUNDCLOUD:
+                    resolved = await parse_soundcloud_playlist(url, max_tracks=MAX_PLAYLIST_TRACKS)
+                    target = (resolved or {}).get("resolved_url") or url
+                    logger.info("soundcloud target: %s", target)
+                    await _process_ytdlp_playlist(message, target, status)
                 else:
                     await _process_ytdlp_playlist(message, url, status)
             else:
                 await _process_single(message, url, status)
+                # Финализация оплаты ТОЛЬКО после успешного одиночного скачивания
+                try:
+                    await db.finalize_action(uid, "download_track", reason, price)
+                except Exception:
+                    pass
         except Exception as e:
             logger.exception("handle_url failed")
             safe = html.escape(str(e))[:500]
             try:
-                await status.edit_text(f"❌ Не удалось скачать: {safe}")
+                await status.edit_text(f"❌ {safe}")
             except Exception:
                 try:
                     await message.answer(f"❌ {safe}", parse_mode=None)

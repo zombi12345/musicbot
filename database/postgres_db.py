@@ -56,6 +56,8 @@ async def init_db():
             ALTER TABLE users ADD COLUMN IF NOT EXISTS trial_used_at TIMESTAMPTZ;
             ALTER TABLE users ADD COLUMN IF NOT EXISTS lang TEXT DEFAULT 'ru';
             ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE;
+
+            ALTER TABLE settings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
         """)
 
         # ==== admins ====

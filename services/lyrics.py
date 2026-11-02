@@ -1,10 +1,8 @@
-"""Текст песен: lrclib.net + lyrics.ovh + meta из URL."""
+"""Текст песен: lrclib.net (primary) + lyrics.ovh (fallback). С очисткой таймингов."""
 import asyncio
-import json
 import logging
 import re
 import urllib.parse
-from typing import Optional
 
 import httpx
 
@@ -15,22 +13,32 @@ LYRICS_OVH_URL = "https://api.lyrics.ovh/v1/{artist}/{title}"
 UA = "MusicBot/1.0"
 
 
+# Формат LRC: [mm:ss.xx] или [mm:ss] или [mm:ss:xx]
+_TIMESTAMP_RE = re.compile(r"\[\d{1,3}:\d{2}(?:[\.:]\d{1,3})?\]\s*")
+
+
 def _clean_timestamps(text: str) -> str:
-    """Убирает [MM:SS.ms] из synced lyrics."""
-    return re.sub(r"\[\d{1,3}:\d{2}(?:\.\d+)?\]\s*", "", text)
+    """Убирает [MM:SS.ms] / [MM:SS] из synced lyrics."""
+    if not text:
+        return ""
+    return _TIMESTAMP_RE.sub("", text)
 
 
 def clean_lyrics(text: str) -> str:
+    """Финальная чистка: тайминги, \\r, пустые строки."""
     if not text:
         return ""
+    text = _clean_timestamps(text)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = "\n".join(line.rstrip() for line in text.split("\n"))
+    # Убираем ведущие пробелы в строках (часто после удаления таймкодов)
+    text = "\n".join(line.strip() for line in text.split("\n"))
+    # Сжимаем 3+ пустых строк в 1 пустую
     while "\n\n\n" in text:
         text = text.replace("\n\n\n", "\n\n")
     return text.strip()
 
 
-async def _try_lrclib(artist: str, title: str) -> Optional[str]:
+async def _try_lrclib(artist: str, title: str):
     for attempt in range(3):
         try:
             async with httpx.AsyncClient(timeout=20, headers={"User-Agent": UA}) as c:
@@ -41,11 +49,13 @@ async def _try_lrclib(artist: str, title: str) -> Optional[str]:
                 if r.status_code == 200:
                     data = r.json()
                     plain = data.get("plainLyrics")
-                    if plain:
+                    if plain and plain.strip():
                         return plain
                     synced = data.get("syncedLyrics")
-                    if synced:
-                        return _clean_timestamps(synced)
+                    if synced and synced.strip():
+                        cleaned = _clean_timestamps(synced)
+                        if cleaned.strip():
+                            return cleaned
                     return None
                 if r.status_code in (502, 503, 504) and attempt < 2:
                     await asyncio.sleep(1.5)
@@ -58,10 +68,10 @@ async def _try_lrclib(artist: str, title: str) -> Optional[str]:
     return None
 
 
-async def _try_lyrics_ovh(artist: str, title: str) -> Optional[str]:
+async def _try_lyrics_ovh(artist: str, title: str):
     try:
-        a = urllib.parse.quote(artist)
-        t = urllib.parse.quote(title)
+        a = urllib.parse.quote(artist or "")
+        t = urllib.parse.quote(title or "")
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.get(LYRICS_OVH_URL.format(artist=a, title=t))
             if r.status_code == 200:
@@ -71,7 +81,7 @@ async def _try_lyrics_ovh(artist: str, title: str) -> Optional[str]:
     return None
 
 
-async def fetch_lyrics(artist: str, title: str) -> Optional[dict]:
+async def fetch_lyrics(artist: str, title: str):
     artist = (artist or "").strip()
     title = (title or "").strip()
     if not title:
@@ -88,13 +98,15 @@ async def fetch_lyrics(artist: str, title: str) -> Optional[dict]:
     return None
 
 
-async def extract_meta_from_url(url: str) -> Optional[tuple]:
-    """Возвращает (artist, title) из URL или None."""
+async def extract_meta_from_url(url: str):
+    """Извлекает (artist, title) из URL: Spotify / Yandex / yt-dlp."""
+    import json
+
     # ==== Spotify ====
     if "spotify.com" in url:
         m = re.search(r"/track/([a-zA-Z0-9]+)", url)
         if not m:
-            return None  # только треки поддерживаем для lyrics
+            return None
         sid = m.group(1)
         title = ""
         artist = ""
@@ -133,7 +145,7 @@ async def extract_meta_from_url(url: str) -> Optional[tuple]:
 
         def _fetch():
             with yt_dlp.YoutubeDL(
-                {"quiet": True, "skip_download": True, "no_warnings": True}
+                {"quiet": True, "skip_download": True, "no_warnings": True, "no_color": True}
             ) as ydl:
                 return ydl.extract_info(url, download=False)
 

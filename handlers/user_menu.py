@@ -218,7 +218,7 @@ async def btn_balance(message: Message) -> None:
             act = f" · {tx['action']}" if tx["action"] else ""
             text += f"  {kind_emoji} {sign}{tx['amount']}⭐{act}\n"
     text += "\n\n💡 Пополнить: /buy\n💎 Или подписка безлимит: /sub"
-    await message.answer(text)
+    await message.answer(text, reply_markup=cancel_kb())
 
 
 # ============================================================
@@ -260,7 +260,7 @@ async def btn_buy(target) -> None:
     text += "\n<b>Цены:</b>\n"
     for key, title in config.ACTION_KEYS.items():
         text += f"  • {title}: {prices.get(key, 0)}⭐\n"
-    await message.answer(text)
+    await message.answer(text, reply_markup=cancel_kb())
 
 
 # ============================================================
@@ -372,7 +372,7 @@ async def btn_howto(message: Message) -> None:
         "• <b>Плейлисты</b> — можно кинуть ссылку на плейлист\n"
         "• <b>Качество</b> — 320 kbps mp3 с обложкой и тегами"
     )
-    await message.answer(text)
+    await message.answer(text, reply_markup=cancel_kb())
 
 
 # ============================================================
@@ -621,7 +621,7 @@ async def btn_playlist_hint(message: Message) -> None:
         "  3. Прогресс: <i>1/10, 2/10...</i>\n"
         "  4. Пропуски — с пометкой что не нашёл"
     )
-    await message.answer(text)
+    await message.answer(text, reply_markup=cancel_kb())
 
 
 @router.callback_query(F.data == "user:help_playlist")
@@ -853,4 +853,13 @@ async def cb_help_lyrics(call: CallbackQuery) -> None:
         await call.message.edit_text(text, reply_markup=back_to_help())
     except Exception:
         await call.message.answer(text, reply_markup=back_to_help())
+    await call.answer()
+
+@router.callback_query(F.data == "user:cancel")
+async def cb_user_cancel(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    try:
+        await call.message.edit_text("❌ Отменено.")
+    except Exception:
+        pass
     await call.answer()

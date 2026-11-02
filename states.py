@@ -40,3 +40,6 @@ class AdminBillingStates(StatesGroup):
 
 class UserLyricsStates(StatesGroup):
     waiting_query = State()
+
+class RecognizeStates(StatesGroup):
+    waiting_voice = State()

@@ -19,8 +19,8 @@ bot = Bot(
 dp = Dispatcher()
 
 # ===== Anti-spam (outer, срабатывает до FSM) =====
-dp.message.outer_middleware(AntiSpamMiddleware(interval=1.0))
-dp.callback_query.outer_middleware(AntiSpamMiddleware(interval=0.7))
+dp.message.outer_middleware(AntiSpamMiddleware(msg_interval=1.5, cb_interval=1.0))
+dp.callback_query.outer_middleware(AntiSpamMiddleware(msg_interval=1.5, cb_interval=1.0))
 
 # ===== Ban =====
 _ban_mw = BanMiddleware()

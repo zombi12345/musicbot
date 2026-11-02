@@ -1,4 +1,4 @@
-"""Anti-spam middleware: удаляет спам-сообщения юзера + отвечает на callback."""
+"""Anti-spam: удаляет ТОЛЬКО спам-кнопки, не ссылки."""
 import logging
 import time
 
@@ -7,12 +7,23 @@ from aiogram.types import CallbackQuery, Message
 
 logger = logging.getLogger(__name__)
 
+# Тексты menu-кнопок (удаляем только их спам)
+MENU_BUTTONS = {
+    "🎵 Скачать трек", "🎤 Распознать",
+    "📋 Плейлист", "📝 Текст песни",
+    "📜 Мои треки", "📊 Профиль",
+    "💎 Подписка", "💳 Баланс",
+    "🎁 Триал", "💡 Как работает",
+    "❓ Помощь", "👑 Админ-панель",
+}
+
 
 class AntiSpamMiddleware(BaseMiddleware):
-    def __init__(self, interval: float = 1.5, delete_spam: bool = True):
-        self.interval = interval
-        self.delete_spam = delete_spam
-        self.last: dict = {}
+    def __init__(self, msg_interval: float = 1.5, cb_interval: float = 1.0):
+        self.msg_interval = msg_interval
+        self.cb_interval = cb_interval
+        self.last_msg: dict = {}
+        self.last_cb: dict = {}
 
     async def __call__(self, handler, event, data):
         user = data.get("event_from_user")
@@ -20,25 +31,29 @@ class AntiSpamMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         now = time.time()
-        last = self.last.get(user.id, 0)
 
-        if now - last < self.interval:
-            # Drop + cleanup
-            logger.debug("antispam drop user=%s type=%s",
-                         user.id, type(event).__name__)
-
-            if isinstance(event, CallbackQuery):
+        if isinstance(event, CallbackQuery):
+            last = self.last_cb.get(user.id, 0)
+            if now - last < self.cb_interval:
                 try:
-                    await event.answer()  # убирает спиннер
+                    await event.answer()
                 except Exception:
                     pass
-            elif isinstance(event, Message) and self.delete_spam:
-                # Удаляем спам-сообщение юзера
-                try:
-                    await event.delete()
-                except Exception:
-                    pass
-            return None
+                return None
+            self.last_cb[user.id] = now
+            return await handler(event, data)
 
-        self.last[user.id] = now
+        if isinstance(event, Message):
+            last = self.last_msg.get(user.id, 0)
+            if now - last < self.msg_interval:
+                # Удаляем ТОЛЬКО спам menu-кнопок
+                if event.text and event.text.strip() in MENU_BUTTONS:
+                    try:
+                        await event.delete()
+                    except Exception:
+                        pass
+                return None
+            self.last_msg[user.id] = now
+            return await handler(event, data)
+
         return await handler(event, data)

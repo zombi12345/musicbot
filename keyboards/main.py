@@ -67,3 +67,14 @@ def lyrics_cancel_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Отмена", callback_data="user:lyrics_cancel")],
     ])
+
+def cancel_kb(callback: str = "user:cancel") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=callback)],
+    ])
+
+
+def recognize_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="user:recognize_cancel")],
+    ])

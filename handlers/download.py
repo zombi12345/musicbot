@@ -13,7 +13,7 @@ from services.downloader import cleanup, download_audio, _sync_search_dl, TrackM
 from services.platforms import Platform, detect_platform
 from database import postgres_db as db
 
-from services.playlist import parse_spotify_playlist, parse_yandex_album
+from services.playlist import parse_spotify_playlist, parse_soundcloud_playlist, parse_yandex_album
 from utils.urls import url_hash
 
 router = Router(name="download")

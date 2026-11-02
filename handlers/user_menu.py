@@ -8,7 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from database import postgres_db as db
-from keyboards.main import (
+from keyboards.main import (main_inline, 
     back_to_help,
     cancel_kb,
     help_inline,
@@ -159,7 +159,7 @@ async def cb_tracks_refresh(call: CallbackQuery) -> None:
 # 💎 ПОДПИСКА
 # ============================================================
 
-async def _send_sub(message: Message, uid: int):
+async def _send_sub(message: Message, uid: int, edit: bool = False):
     pricing = await db.get_pricing()
     mode = await db.get_billing_mode()
     paid = await db.is_paid(uid)
@@ -228,7 +228,7 @@ async def cb_sub_plan(call: CallbackQuery) -> None:
 # 💳 БАЛАНС
 # ============================================================
 
-async def _send_balance(message: Message, uid: int):
+async def _send_balance(message: Message, uid: int, edit: bool = False):
     bal = await db.get_balance(uid)
     txs = await db.get_transactions(uid, limit=10)
     mode = await db.get_billing_mode()
@@ -250,6 +250,12 @@ async def _send_balance(message: Message, uid: int):
             act = f" · {tx['action']}" if tx["action"] else ""
             text += f"  {emoji} {sign}{tx['amount']}⭐{act}\n"
     text += "\n💡 /buy — пополнить · /sub — подписка"
+    if edit:
+        try:
+            await message.edit_text(text, reply_markup=cancel_kb())
+            return
+        except Exception:
+            pass
     await message.answer(text, reply_markup=cancel_kb())
 
 
@@ -307,7 +313,7 @@ async def cb_buy(call: CallbackQuery) -> None:
 # 🎁 ТРИАЛ
 # ============================================================
 
-async def _send_trial_result(message: Message, uid: int):
+async def _send_trial_result(message: Message, uid: int, edit: bool = False):
     trial = await db.get_trial()
     if not trial.get("enabled"):
         await message.answer(
@@ -342,7 +348,7 @@ async def _send_trial_result(message: Message, uid: int):
     ok = await db.activate_trial(uid)
     if ok:
         days = trial["days"]
-        await message.answer(
+        result_text = (
             f"🎉 <b>Триал активирован!</b>\n\n"
             f"✅ <b>{days} дн.</b> безлимита\n\n"
             f"<b>Что доступно:</b>\n"
@@ -351,8 +357,22 @@ async def _send_trial_result(message: Message, uid: int):
             f"  • 📋 Плейлисты\n\n"
             f"Просто пришли ссылку или нажми 🎵"
         )
+        if edit:
+            try:
+                await message.edit_text(result_text)
+                return
+            except Exception:
+                pass
+        await message.answer(result_text)
     else:
-        await message.answer("❌ Не удалось. Попробуй позже.", reply_markup=cancel_kb())
+        msg = "❌ Не удалось. Попробуй позже."
+        if edit:
+            try:
+                await message.edit_text(msg, reply_markup=cancel_kb())
+                return
+            except Exception:
+                pass
+        await message.answer(msg, reply_markup=cancel_kb())
 
 
 @router.message(Command("trial"))
@@ -682,3 +702,165 @@ async def _do_lyrics(message: Message, query: str) -> None:
             cut = chunk
         await message.answer(rest[:cut])
         rest = rest[cut:].lstrip("\n")
+
+# ============================================================
+# 🏠 ГЛАВНОЕ МЕНЮ (инлайн)
+# ============================================================
+
+@router.message(F.text == "🏠 Меню")
+@router.message(Command("menu"))
+async def btn_main_menu(message: Message) -> None:
+    if await is_banned(message.from_user.id):
+        return
+    admin = await is_admin(message.from_user.id)
+    await message.answer(
+        "🏠 <b>Главное меню</b>\n\n"
+        "Выбери действие:",
+        reply_markup=main_inline(is_admin=admin),
+    )
+
+
+@router.callback_query(F.data == "user:menu")
+async def cb_main_menu(call: CallbackQuery) -> None:
+    if await is_banned(call.from_user.id):
+        return
+    admin = await is_admin(call.from_user.id)
+    try:
+        await call.message.edit_text(
+            "🏠 <b>Главное меню</b>\n\nВыбери действие:",
+            reply_markup=main_inline(is_admin=admin),
+        )
+    except Exception:
+        await call.message.answer(
+            "🏠 <b>Главное меню</b>",
+            reply_markup=main_inline(is_admin=admin),
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data == "user:menu_download")
+async def cb_menu_download(call: CallbackQuery) -> None:
+    text = (
+        "🎵 <b>Скачать трек</b>\n\n"
+        "Пришли ссылку из:\n\n"
+        "• <b>Spotify</b> — open.spotify.com/track/...\n"
+        "• <b>SoundCloud</b> — soundcloud.com/artist/track\n"
+        "• <b>YouTube</b> — youtu.be/...\n"
+        "• <b>Яндекс.Музыка</b> — music.yandex.ru/album/.../track/...\n"
+        "• <b>Bandcamp, VK, Mixcloud</b>\n\n"
+        "💡 Просто скопируй из «Поделиться» и пришли сюда."
+    )
+    try:
+        await call.message.edit_text(text, reply_markup=cancel_kb())
+    except Exception:
+        await call.message.answer(text, reply_markup=cancel_kb())
+    await call.answer()
+
+
+@router.callback_query(F.data == "user:menu_recognize")
+async def cb_menu_recognize(call: CallbackQuery, state: FSMContext) -> None:
+    from states import RecognizeStates
+    await state.set_state(RecognizeStates.waiting_voice)
+    text = (
+        "🎤 <b>Распознать музыку</b>\n\n"
+        "🔴 <b>Жду голосовое сообщение</b>\n\n"
+        "Запиши фрагмент 10-15 секунд и отправь сюда.\n\n"
+        "💡 Советы:\n"
+        "  • Минимум 10 секунд\n"
+        "  • Ближе к источнику звука\n\n"
+        "💳 <i>Если не распознаю — деньги не спишутся</i>"
+    )
+    try:
+        await call.message.edit_text(text, reply_markup=recognize_kb())
+    except Exception:
+        await call.message.answer(text, reply_markup=recognize_kb())
+    await call.answer()
+
+
+@router.callback_query(F.data == "user:menu_playlist")
+async def cb_menu_playlist(call: CallbackQuery) -> None:
+    text = (
+        "📋 <b>Скачать плейлист</b>\n\n"
+        "Пришли ссылку на <b>альбом или плейлист</b>:\n\n"
+        "• <b>Spotify</b> — open.spotify.com/album/... или /playlist/...\n"
+        "• <b>Яндекс.Музыка</b> — music.yandex.ru/album/...\n"
+        "• <b>SoundCloud</b> — soundcloud.com/artist/sets/...\n"
+        "• <b>YouTube</b> — youtube.com/playlist?list=...\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "⚠️ Максимум <b>20 треков</b> за раз\n"
+        "💡 Работает через Deezer — находит похожий альбом по названию"
+    )
+    try:
+        await call.message.edit_text(text, reply_markup=cancel_kb())
+    except Exception:
+        await call.message.answer(text, reply_markup=cancel_kb())
+    await call.answer()
+
+
+@router.callback_query(F.data == "user:menu_lyrics")
+async def cb_menu_lyrics(call: CallbackQuery, state: FSMContext) -> None:
+    from states import UserLyricsStates
+    await state.set_state(UserLyricsStates.waiting_query)
+    text = (
+        "📝 <b>Текст песни</b>\n\n"
+        "Напиши: <code>Исполнитель - Название</code>\n\n"
+        "Например: <code>Imagine Dragons - Believer</code>\n\n"
+        "💡 Или ссылку на трек"
+    )
+    try:
+        await call.message.edit_text(text, reply_markup=cancel_kb())
+    except Exception:
+        await call.message.answer(text, reply_markup=cancel_kb())
+    await call.answer()
+
+
+@router.callback_query(F.data == "user:menu_profile")
+async def cb_menu_profile(call: CallbackQuery) -> None:
+    from handlers.start import _send_profile
+    await _send_profile(call.message, call.from_user.id, edit=True)
+    await call.answer()
+
+
+@router.callback_query(F.data == "user:menu_sub")
+async def cb_menu_sub(call: CallbackQuery) -> None:
+    await _send_sub(call.message, call.from_user.id, edit=True)
+    await call.answer()
+
+
+@router.callback_query(F.data == "user:menu_balance")
+async def cb_menu_balance(call: CallbackQuery) -> None:
+    await _send_balance(call.message, call.from_user.id, edit=True)
+    await call.answer()
+
+
+@router.callback_query(F.data == "user:menu_trial")
+async def cb_menu_trial(call: CallbackQuery) -> None:
+    await _send_trial_result(call.message, call.from_user.id, edit=True)
+    await call.answer()
+
+
+@router.callback_query(F.data == "user:menu_howto")
+async def cb_menu_howto(call: CallbackQuery) -> None:
+    text = (
+        "💡 <b>Как пользоваться</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "🎵 <b>Скачать трек</b>\n"
+        "Пришли ссылку из Spotify / SoundCloud / YouTube / Яндекс\n\n"
+        "🎤 <b>Распознать</b>\n"
+        "Голосовое 10-15 сек\n\n"
+        "📋 <b>Плейлист</b>\n"
+        "Ссылка на альбом — до 20 треков\n\n"
+        "📝 <b>Текст песни</b>\n"
+        "/lyrics Исполнитель - Название\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "💎 <b>Оплата</b>\n"
+        "• /sub — подписка (безлимит)\n"
+        "• /buy — баланс (за действия)\n"
+        "• /trial — триал (один раз)\n\n"
+        "💡 Кэш: повторный трек — бесплатно"
+    )
+    try:
+        await call.message.edit_text(text, reply_markup=cancel_kb())
+    except Exception:
+        await call.message.answer(text, reply_markup=cancel_kb())
+    await call.answer()

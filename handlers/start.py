@@ -122,11 +122,24 @@ async def btn_recognize_hint(message: Message) -> None:
 
 @router.message(F.text == "📊 Профиль")
 async def btn_profile(message: Message) -> None:
-    uid = message.from_user.id
+    if await is_banned(message.from_user.id):
+        return
+    from keyboards.main import main_menu
+    await _send_profile(message, message.from_user.id)
+
+
+async def _send_profile(message: Message, uid: int, edit: bool = False):
     user = await db.get_user(uid)
     if not user:
-        await message.answer("⚠️ Сначала /start")
+        if edit:
+            try:
+                await message.edit_text("⚠️ Сначала /start")
+            except Exception:
+                pass
+        else:
+            await message.answer("⚠️ Сначала /start")
         return
+
     paid = await db.is_paid(uid)
     sub_end = user["subscription_end"].strftime("%d.%m.%Y") if user["subscription_end"] else "—"
     balance = await db.get_balance(uid)
@@ -138,10 +151,10 @@ async def btn_profile(message: Message) -> None:
     trial_status = "✅ использован" if user["trial_used"] else (
         "🎁 доступен" if trial.get("enabled") else "❌ отключён"
     )
-
     status = "💎 Premium" if paid else "🆓 Бесплатный"
+
     text = (
-        f"👤 <b>Мой профиль</b>\n\n"
+        f"👤 <b>Профиль</b>\n\n"
         f"🆔 ID: <code>{uid}</code>\n"
         f"📝 Имя: {user['first_name'] or '—'}\n"
         f"📅 С нами с: {user['created_at'].strftime('%d.%m.%Y')}\n\n"
@@ -150,24 +163,20 @@ async def btn_profile(message: Message) -> None:
     )
     if paid:
         text += f"📅 Подписка до: <b>{sub_end}</b>\n"
-    text += (
-        f"💳 Баланс: <b>{balance}⭐</b>\n"
-        f"🎁 Триал: {trial_status}\n"
-    )
+    text += f"💳 Баланс: <b>{balance}⭐</b>\n"
+    text += f"🎁 Триал: {trial_status}\n"
     if free_limit > 0:
         text += f"🆓 Бесплатных сегодня: <b>{max(0, free_limit - free_used)}/{free_limit}</b>\n"
-    text += (
-        f"\n━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📜 Скачано треков: <b>{total_downloads}</b>\n\n"
-        f"💡 <b>Действия:</b>\n"
-        f"  • /sub — подписка\n"
-        f"  • /balance — баланс\n"
-        f"  • /buy — пополнить\n"
-        f"  • /trial — активировать триал\n"
-    )
-    await message.answer(text)
+    text += f"\n📜 Скачано: <b>{total_downloads}</b>\n"
 
-
+    from keyboards.main import cancel_kb
+    if edit:
+        try:
+            await message.edit_text(text, reply_markup=cancel_kb())
+            return
+        except Exception:
+            pass
+    await message.answer(text, reply_markup=cancel_kb())
 @router.message(F.text == "👑 Админ-панель")
 async def btn_admin(message: Message, state: FSMContext) -> None:
     if not await is_admin(message.from_user.id):

@@ -7,17 +7,31 @@ from aiogram.types import (
 
 
 def main_menu(is_admin: bool = False) -> ReplyKeyboardMarkup:
-    kb = [
-        [KeyboardButton(text="🎵 Скачать трек"), KeyboardButton(text="🎤 Распознать")],
-        [KeyboardButton(text="📋 Плейлист"), KeyboardButton(text="📝 Текст песни")],
-        [KeyboardButton(text="📜 Мои треки"), KeyboardButton(text="📊 Профиль")],
-        [KeyboardButton(text="💎 Подписка"), KeyboardButton(text="💳 Баланс")],
-        [KeyboardButton(text="🎁 Триал"), KeyboardButton(text="💡 Как работает")],
-        [KeyboardButton(text="❓ Помощь")],
-    ]
+    """Снизу — только Меню + Админ (для админа)."""
+    kb = [[KeyboardButton(text="🏠 Меню")]]
     if is_admin:
         kb.append([KeyboardButton(text="👑 Админ-панель")])
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+
+def main_inline(is_admin: bool = False) -> InlineKeyboardMarkup:
+    """Все функции — в инлайн-сообщении."""
+    kb = [
+        [InlineKeyboardButton(text="🎵 Скачать трек", callback_data="user:menu_download"),
+         InlineKeyboardButton(text="🎤 Распознать", callback_data="user:menu_recognize")],
+        [InlineKeyboardButton(text="📋 Плейлист", callback_data="user:menu_playlist"),
+         InlineKeyboardButton(text="📝 Текст песни", callback_data="user:menu_lyrics")],
+        [InlineKeyboardButton(text="📜 Мои треки", callback_data="user:tracks"),
+         InlineKeyboardButton(text="📊 Профиль", callback_data="user:menu_profile")],
+        [InlineKeyboardButton(text="💎 Подписка", callback_data="user:menu_sub"),
+         InlineKeyboardButton(text="💳 Баланс", callback_data="user:menu_balance")],
+        [InlineKeyboardButton(text="🎁 Триал", callback_data="user:menu_trial"),
+         InlineKeyboardButton(text="💡 Как работает", callback_data="user:menu_howto")],
+        [InlineKeyboardButton(text="❓ Помощь", callback_data="user:help")],
+    ]
+    if is_admin:
+        kb.append([InlineKeyboardButton(text="👑 Админ-панель", callback_data="adm:back")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 def sub_inline(pricing, subscription_enabled: bool) -> InlineKeyboardMarkup:
@@ -34,6 +48,7 @@ def sub_inline(pricing, subscription_enabled: bool) -> InlineKeyboardMarkup:
                 ])
     kb.append([InlineKeyboardButton(text="💳 Пополнить баланс", callback_data="user:buy")])
     kb.append([InlineKeyboardButton(text="🎁 Активировать триал", callback_data="user:trial")])
+    kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="user:menu")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
@@ -41,11 +56,10 @@ def help_inline() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎵 Как скачать", callback_data="user:help_download")],
         [InlineKeyboardButton(text="🎤 Как распознать", callback_data="user:help_recognize")],
-        [InlineKeyboardButton(text="📋 Плейлисты", callback_data="user:help_playlist")],
-        [InlineKeyboardButton(text="📝 Текст песни", callback_data="user:help_lyrics")],
         [InlineKeyboardButton(text="💎 Подписка vs Баланс", callback_data="user:help_billing")],
         [InlineKeyboardButton(text="💳 Как пополнить", callback_data="user:help_buy")],
         [InlineKeyboardButton(text="🆘 Проблемы", callback_data="user:help_troubleshoot")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="user:menu")],
     ])
 
 
@@ -58,23 +72,24 @@ def back_to_help() -> InlineKeyboardMarkup:
 def tracks_inline(has_tracks: bool) -> InlineKeyboardMarkup:
     kb = []
     if has_tracks:
-        kb.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="user:tracks_refresh")])
-    kb.append([InlineKeyboardButton(text="🎵 Скачать ещё", callback_data="user:hint_download")])
+        kb.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="user:tracks")])
+    kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="user:menu")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-def lyrics_cancel_kb() -> InlineKeyboardMarkup:
+def cancel_kb(callback: str = "user:menu") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="user:lyrics_cancel")],
-    ])
-
-def cancel_kb(callback: str = "user:cancel") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Отмена", callback_data=callback)],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=callback)],
     ])
 
 
 def recognize_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Отмена", callback_data="user:recognize_cancel")],
+    ])
+
+
+def lyrics_cancel_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="user:lyrics_cancel")],
     ])

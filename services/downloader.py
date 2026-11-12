@@ -348,51 +348,32 @@ async def _spotify_meta(url):
 
 
 async def _yandex_meta(url):
-    """Метаданные Яндекс.Музыки: public API (работает с любого IP)."""
-    import re as _re
-
-    # Извлекаем track_id из URL: /album/.../track/XXXXX или /track/XXXXX
-    m = _re.search(r"/track/(\d+)", url)
-    if not m:
-        # Пробуем альбом? Но это трек — не должно случиться
-        logger.warning("Yandex: не нашёл track_id в URL: %s", url)
+    """Метаданные Яндекс.Музыки через HTML og-теги (JSON-LD fallback)."""
+    html_text = await _fetch_html(url)
+    if not html_text:
+        logger.warning("Yandex: пустой HTML")
         return TrackMeta(source="yandex")
 
-    track_id = m.group(1)
-    api_url = f"https://api.music.yandex.net/tracks/{track_id}"
-    headers = {
-        "User-Agent": "Yandex-Music-API",
-        "X-Yandex-Music-Client": "YandexMusicAndroid/24023621",
-    }
+    # Сначала JSON-LD (если есть)
+    ld = _parse_json_ld(html_text)
+    if ld.title and ld.artist:
+        ld.source = "yandex"
+        logger.info("Yandex meta JSON-LD: artist=%r title=%r", ld.artist, ld.title)
+        return ld
 
-    try:
-        async with httpx.AsyncClient(timeout=20, headers=headers) as c:
-            r = await c.get(api_url)
-            if r.status_code != 200:
-                logger.warning("Yandex API %s → HTTP %s", track_id, r.status_code)
-                return TrackMeta(source="yandex")
-            data = r.json()
-    except Exception as e:
-        logger.warning("Yandex API failed: %s", str(e)[:100])
-        return TrackMeta(source="yandex")
+    # Fallback — og-теги
+    og = _parse_og(html_text)
+    if og.title:
+        if not ld.title:
+            ld.title = og.title
+        if not ld.artist:
+            ld.artist = og.artist
+        ld.source = "yandex"
+        logger.info("Yandex meta OG: artist=%r title=%r", ld.artist, ld.title)
+        return ld
 
-    try:
-        tracks = (data.get("result") or [])
-        if not tracks:
-            return TrackMeta(source="yandex")
-        t = tracks[0]
-        title = (t.get("title") or "").strip()
-        artists = t.get("artists") or []
-        artist = ", ".join(a.get("name", "") for a in artists if a.get("name"))
-        duration = int((t.get("durationMs") or 0) // 1000)
-        if not title:
-            return TrackMeta(source="yandex")
-        logger.info("Yandex API OK: artist=%r title=%r dur=%d", artist, title, duration)
-        return TrackMeta(title=title, artist=artist, duration=duration, source="yandex")
-    except Exception as e:
-        logger.warning("Yandex API parse failed: %s", str(e)[:100])
-        return TrackMeta(source="yandex")
-
+    logger.warning("Yandex: не нашёл метаданных в HTML")
+    return TrackMeta(source="yandex")
 
 # ============================================================
 # yt-dlp

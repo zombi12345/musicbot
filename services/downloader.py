@@ -348,9 +348,35 @@ async def _spotify_meta(url):
     return meta
 
 
+# Глобальный кэш рабочего прокси для Яндекса
+_yandex_proxy_cache = {"proxy": None, "checked": 0}
+
+async def _get_free_proxies():
+    """Получает список бесплатных прокси с GitHub-репозиториев."""
+    urls = [
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+        "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
+    ]
+    proxies = set()
+    async with httpx.AsyncClient(timeout=10) as c:
+        for u in urls:
+            try:
+                r = await c.get(u)
+                if r.status_code == 200:
+                    for line in r.text.splitlines():
+                        line = line.strip()
+                        if line and ":" in line and not line.startswith("#"):
+                            proxies.add(f"http://{line}")
+            except Exception:
+                pass
+    return list(proxies)[:50]  # Берем первые 50 для проверки
+
 async def _yandex_meta(url):
-    """Метаданные Яндекс.Музыки через цепочку CORS-прокси (обход 451)."""
+    """Метаданные Яндекс.Музыки через авто-подбор бесплатных прокси."""
     import re as _re
+    from yandex_music import Client
+    from yandex_music.utils.request import Request
 
     m = _re.search(r"/track/(\d+)", url)
     if not m:
@@ -358,40 +384,58 @@ async def _yandex_meta(url):
         return TrackMeta(source="yandex")
     track_id = m.group(1)
 
-    # Список прокси (Render -> Heroku -> Corsproxy -> AllOrigins)
-    proxies = [
-        f"https://yandex-music-cors-proxy.onrender.com/https://api.music.yandex.net:443/tracks/{track_id}",
-        f"https://yandex-music-cors-proxy.herokuapp.com/https://api.music.yandex.net:443/tracks/{track_id}",
-        f"https://corsproxy.io/?https://api.music.yandex.net/tracks/{track_id}",
-        f"https://api.allorigins.win/raw?url=https://api.music.yandex.net/tracks/{track_id}",
-    ]
+    token = os.getenv("YANDEX_TOKEN", "").strip()
+    if not token:
+        logger.warning("Yandex: нет токена")
+        return TrackMeta(source="yandex")
 
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-
-    for proxy_url in proxies:
-        try:
-            async with httpx.AsyncClient(timeout=30, headers=headers, follow_redirects=True) as c:
-                r = await c.get(proxy_url)
-                if r.status_code != 200:
-                    logger.warning(f"Proxy {proxy_url.split('/')[2]} -> {r.status_code}")
-                    continue
-                data = r.json()
-            tracks = data.get("result") or []
-            if not tracks:
+    # Проверяем кэш
+    global _yandex_proxy_cache
+    proxy_to_try = _yandex_proxy_cache.get("proxy")
+    
+    if not proxy_to_try:
+        logger.info("Yandex: ищем рабочий прокси...")
+        free_proxies = await _get_free_proxies()
+        logger.info(f"Yandex: найдено {len(free_proxies)} прокси, проверяем...")
+        
+        for proxy in free_proxies[:20]:  # Проверяем первые 20
+            try:
+                request = Request(proxy_url=proxy)
+                client = Client(token, request=request).init()
+                tracks = await asyncio.to_thread(client.tracks, [track_id])
+                if tracks:
+                    t = tracks[0]
+                    _yandex_proxy_cache["proxy"] = proxy
+                    _yandex_proxy_cache["checked"] = 0
+                    title = t.title or ""
+                    artists = ", ".join(a.name for a in t.artists if a.name) if t.artists else ""
+                    duration = int(t.duration_ms // 1000) if t.duration_ms else 0
+                    logger.info(f"Yandex proxy OK: artist={artists!r} title={title!r} proxy={proxy}")
+                    return TrackMeta(title=title, artist=artists, duration=duration, source="yandex")
+            except Exception:
                 continue
-            t = tracks[0]
-            title = (t.get("title") or "").strip()
-            artists = t.get("artists") or []
-            artist = ", ".join(a.get("name", "") for a in artists if a.get("name"))
-            duration = int((t.get("durationMs") or 0) // 1000)
-            if title:
-                logger.info(f"Yandex CORS OK: artist={artist!r} title={title!r}")
-                return TrackMeta(title=title, artist=artist, duration=duration, source="yandex")
-        except Exception as e:
-            logger.warning(f"Proxy {proxy_url.split('/')[2]} failed: {str(e)[:80]}")
-            continue
+        logger.warning("Yandex: ни один прокси не сработал")
+        return TrackMeta(source="yandex")
+    else:
+        # Используем кэшированный прокси
+        try:
+            request = Request(proxy_url=proxy_to_try)
+            client = Client(token, request=request).init()
+            tracks = await asyncio.to_thread(client.tracks, [track_id])
+            if tracks:
+                t = tracks[0]
+                title = t.title or ""
+                artists = ", ".join(a.name for a in t.artists if a.name) if t.artists else ""
+                duration = int(t.duration_ms // 1000) if t.duration_ms else 0
+                return TrackMeta(title=title, artist=artists, duration=duration, source="yandex")
+        except Exception:
+            _yandex_proxy_cache["proxy"] = None
+            _yandex_proxy_cache["checked"] += 1
+            if _yandex_proxy_cache["checked"] > 3:
+                return TrackMeta(source="yandex")
+            # Рекурсивно пробуем найти новый
+            return await _yandex_meta(url)
 
-    logger.warning("Yandex: все прокси упали")
     return TrackMeta(source="yandex")
 def _ydl_opts(fmt, fast: bool = False):
     """fast=True — для плейлистов: быстрее падать, меньше retries."""

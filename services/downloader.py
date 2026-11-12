@@ -348,33 +348,6 @@ async def _spotify_meta(url):
     return meta
 
 
-# Глобальный кэш рабочего прокси для Яндекса
-_yandex_proxy_cache = {"proxy": None, "checked": 0}
-
-async def _get_free_proxies():
-    """Получает список бесплатных прокси с GitHub-репозиториев."""
-    urls = [
-        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
-        "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
-    ]
-    proxies = set()
-    async with httpx.AsyncClient(timeout=10) as c:
-        for u in urls:
-            try:
-                r = await c.get(u)
-                if r.status_code == 200:
-                    for line in r.text.splitlines():
-                        line = line.strip()
-                        if line and ":" in line and not line.startswith("#"):
-                            proxies.add(f"http://{line}")
-            except Exception:
-                pass
-    return list(proxies)[:50]  # Берем первые 50 для проверки
-
-# Глобальный флаг, чтобы не "прогревать" прокси при каждом запросе
-_yandex_proxy_warmed = False
-
 async def _yandex_meta(url):
     """Метаданные Яндекс.Музыки из HTML (og-теги + JSON-LD)."""
     html_text = await _fetch_html(url)
@@ -382,14 +355,12 @@ async def _yandex_meta(url):
         logger.warning("Yandex: пустой HTML")
         return TrackMeta(source="yandex")
 
-    # Сначала JSON-LD (если есть)
     ld = _parse_json_ld(html_text)
     if ld.title and ld.artist:
         ld.source = "yandex"
         logger.info("Yandex meta JSON-LD: artist=%r title=%r", ld.artist, ld.title)
         return ld
 
-    # Fallback — og-теги
     og = _parse_og(html_text)
     if og.title:
         if not ld.title:
@@ -632,3 +603,42 @@ def cleanup(path):
             Path(path).unlink()
     except Exception as e:
         logger.warning("cleanup failed: %s", e)
+
+
+async def download_audio(url, audio_format="mp3_320"):
+    platform = detect_platform(url)
+    if platform == Platform.SPOTIFY:
+        meta = await _spotify_meta(url)
+        if not meta.title:
+            raise RuntimeError("Не удалось извлечь метаданные Spotify")
+        q = f"ytsearch5:{meta.artist} {meta.title}" if meta.artist else f"ytsearch5:{meta.title} audio"
+        logger.info("Spotify query: %s", q)
+        r = await asyncio.to_thread(_sync_search_dl, q, meta, audio_format, True)
+        r.platform = "spotify"
+        return r
+    if platform == Platform.YANDEX:
+        meta = await _yandex_meta(url)
+        if not meta.title:
+            raise RuntimeError("Не удалось извлечь метаданные Яндекс.Музыки. Пришли ссылку на SoundCloud или YouTube.")
+        q = f"ytsearch5:{meta.artist} {meta.title}" if meta.artist else f"ytsearch5:{meta.title} audio"
+        logger.info("Yandex query: %s", q)
+        r = await asyncio.to_thread(_sync_search_dl, q, meta, audio_format, True)
+        r.platform = "yandex"
+        return r
+    if platform in (Platform.SOUNDCLOUD, Platform.YOUTUBE):
+        try:
+            r = await asyncio.to_thread(_sync_direct, url, audio_format, fast=True)
+        except Exception as _e:
+            _es = str(_e).lower()
+            if any(x in _es for x in ("sign in", "failed to extract", "player response", "not a bot")):
+                raise RuntimeError(
+                    "⚠ YouTube блокирует наш сервер, поэтому эту ссылку скачать не могу.\n\n"
+                    "💡 Что делать:\n"
+                    "• Пришли этот же трек со SoundCloud — качаем без проблем\n"
+                    "• Spotify-ссылки работают (через SoundCloud)\n"
+                    "• YouTube-ссылки временно недоступны с этого сервера"
+                )
+            raise
+        r.platform = platform.value
+        return r
+    raise RuntimeError(f"Платформа не поддерживается: {platform.value}")

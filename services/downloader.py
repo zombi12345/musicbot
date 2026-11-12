@@ -9,7 +9,7 @@ from pathlib import Path
 
 import httpx
 import yt_dlp
-from yt_dlp_proxy import YTDLPProxy
+from yt_dlp_proxy import YtDLPProxy
 from dotenv import load_dotenv
 from mutagen.id3 import ID3, TIT2, TPE1
 from mutagen.mp3 import MP3
@@ -550,7 +550,7 @@ def _sync_search_dl(query, meta, fmt, strict, fast: bool = False):
 
 
 def _sync_direct(url, fmt, fast: bool = False):
-    """yt-dlp → yt-dlp-proxy (авто-подбор бесплатных прокси) для YouTube."""
+    """yt-dlp → YtDLPProxy fallback для YouTube."""
     opts = _ydl_opts(fmt, fast=fast)
     opts["outtmpl"] = str(DOWNLOAD_DIR / "%(title).80s.%(ext)s")
 
@@ -584,22 +584,38 @@ def _sync_direct(url, fmt, fast: bool = False):
         if is_youtube and is_blocked:
             logger.warning("YouTube blocked, trying yt-dlp-proxy: %s", err_str[:80])
             try:
-                proxy_downloader = YTDLPProxy()
-                proxy_downloader.download(url, output_dir=str(DOWNLOAD_DIR))
-                # После скачивания через прокси, файл может называться иначе
-                # Ищем самый свежий mp3
+                # YtDLPProxy.execute принимает список аргументов как yt-dlp
+                output_tmpl = str(DOWNLOAD_DIR / "%(title).80s.%(ext)s")
+                cmd = [
+                    url,
+                    "-f", "bestaudio/best",
+                    "--no-playlist",
+                    "--extract-audio",
+                    "--audio-format", "mp3",
+                    "--audio-quality", "320K" if fmt == "mp3_320" else "192K",
+                    "--output", output_tmpl,
+                ]
+                if FFMPEG_LOCATION:
+                    cmd.extend(["--ffmpeg-location", FFMPEG_LOCATION])
+                YtDLPProxy.execute(cmd)
+
+                # После скачивания через прокси ищем самый свежий mp3
                 import os
                 files = sorted(DOWNLOAD_DIR.glob("*.mp3"), key=os.path.getmtime, reverse=True)
                 if not files:
-                    raise RuntimeError("yt-dlp-proxy не создал файл")
+                    raise RuntimeError("YtDLPProxy не создал файл")
                 fp = files[0]
                 title = fp.stem
-                performer = "Unknown"
+                performer = "YouTube (via proxy)"
                 return DownloadResult(filepath=fp, title=title, performer=performer, duration=0)
             except Exception as proxy_err:
-                logger.error("yt-dlp-proxy failed: %s", str(proxy_err)[:100])
-                raise RuntimeError("YouTube блокирует даже прокси. Пришли ссылку со SoundCloud.") from proxy_err
+                logger.error("YtDLPProxy failed: %s", str(proxy_err)[:100])
+                raise RuntimeError(
+                    "YouTube блокирует даже бесплатные прокси. "
+                    "Пришли ссылку со SoundCloud."
+                ) from proxy_err
         raise
+
 def cleanup(path):
     try:
         if path and Path(path).exists():

@@ -53,6 +53,15 @@ def _get_lock(uid: int) -> asyncio.Lock:
 
 
 def _is_playlist(url: str) -> bool:
+    # Yandex: /album/ID/track/ID → single track
+    if re.search(r"/album/\d+/track/\d+", url):
+        return False
+    # Spotify: /track/ID → single track
+    if "spotify.com" in url and re.search(r"/track/[a-zA-Z0-9]+", url):
+        return False
+    # SoundCloud sets → playlist
+    if "soundcloud.com" in url and "/sets/" in url:
+        return True
     return any(re.search(p, url) for p in PLAYLIST_PATTERNS)
 
 

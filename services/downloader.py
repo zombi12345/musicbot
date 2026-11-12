@@ -56,33 +56,7 @@ def _setup_cookies_from_env():
 
 COOKIES_FILE = os.getenv("YT_COOKIES_FILE", "").strip() or _setup_cookies_from_env()
 
-if COOKIES_FILE:
-    try:
-        size = os.path.getsize(COOKIES_FILE)
-        logger.info("COOKIES_FILE active: %s (%d bytes)", COOKIES_FILE, size)
-    except Exception as e:
-        logger.warning("COOKIES_FILE set but unreadable: %s", e)
-else:
-    logger.warning("COOKIES_FILE not set — YouTube will likely fail")
-
 FFMPEG_LOCATION = _resolve_ffmpeg()
-
-# ==== Deno (JS-runtime для YouTube челленджей) ====
-def _resolve_deno() -> str | None:
-    env = os.getenv("DENO_PATH", "").strip()
-    if env and os.path.exists(env):
-        return env
-    # Рядом с проектом (Render: build скачивает сюда)
-    proj = Path(__file__).resolve().parent.parent
-    for name in ("deno", "deno.exe"):
-        p = proj / name
-        if p.exists():
-            return str(p)
-    # В PATH
-    import shutil
-    return shutil.which("deno")
-
-DENO_PATH = _resolve_deno()
 SPOTIFY_OEMBED = "https://open.spotify.com/oembed"
 SPOTIFY_EMBED = "https://open.spotify.com/embed/track/{id}"
 ITUNES_SEARCH = "https://itunes.apple.com/search"
@@ -411,7 +385,6 @@ def _ydl_opts(fmt, fast: bool = False):
             "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
         },
         "geo_bypass": True,
-        "js_runtimes": ({"deno": {"path": DENO_PATH}} if DENO_PATH else {}),
         # Пробуем разные клиенты YouTube — уменьшает ConnectionResetError
         "extractor_args": {
             "youtube": {"player_client": ["tv", "mweb"]},
@@ -547,41 +520,54 @@ def _sync_search_dl(query, meta, fmt, strict, fast: bool = False):
 
 
 def _sync_direct(url, fmt, fast: bool = False):
-    """yt-dlp → Piped fallback для YouTube."""
     opts = _ydl_opts(fmt, fast=fast)
     opts["outtmpl"] = str(DOWNLOAD_DIR / "%(title).80s.%(ext)s")
-
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        if "entries" in info:
+            info = info["entries"][0]
+        fp = Path(ydl.prepare_filename(info)).with_suffix(".mp3")
+    title = info.get("title") or "Unknown"
+    performer = info.get("uploader") or info.get("artist") or "Unknown"
+    dur = int(info.get("duration") or 0)
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            if "entries" in info:
-                info = info["entries"][0]
-            fp = Path(ydl.prepare_filename(info)).with_suffix(".mp3")
-
-        title = info.get("title") or "Unknown"
-        performer = info.get("uploader") or info.get("artist") or "Unknown"
-        duration = int(info.get("duration") or 0)
-
-        try:
-            a = MP3(str(fp))
-            if a.tags is None:
-                a.add_tags()
-            a.tags.add(TIT2(encoding=3, text=title))
-            a.tags.add(TPE1(encoding=3, text=performer))
-            a.save()
-        except Exception as e:
-            logger.warning("Tags failed: %s", e)
-
-        return DownloadResult(filepath=fp, title=title, performer=performer, duration=duration)
+        a = MP3(str(fp))
+        if a.tags is None:
+            a.add_tags()
+        a.tags.add(TIT2(encoding=3, text=title))
+        a.tags.add(TPE1(encoding=3, text=performer))
+        a.save()
     except Exception as e:
-        err_str = str(e)
-        is_youtube = "youtube" in url.lower() or "youtu.be" in url.lower()
-        is_blocked = ("Sign in" in err_str or "Failed to extract" in err_str
-                      or "not a bot" in err_str or "player response" in err_str)
-        if is_youtube and is_blocked:
-            logger.warning("YouTube blocked → Piped fallback: %s", err_str[:80])
-            return _piped_fetch(url, fmt)
-        raise
+        logger.warning("Tags failed: %s", e)
+    return DownloadResult(filepath=fp, title=title, performer=performer, duration=dur)
+
+
+async def download_audio(url, audio_format="mp3_320"):
+    platform = detect_platform(url)
+    if platform == Platform.SPOTIFY:
+        meta = await _spotify_meta(url)
+        if not meta.title:
+            raise RuntimeError("Не удалось извлечь метаданные Spotify")
+        q = f"ytsearch5:{meta.artist} {meta.title}" if meta.artist else f"ytsearch5:{meta.title} audio"
+        logger.info("Spotify query: %s", q)
+        r = await asyncio.to_thread(_sync_search_dl, q, meta, audio_format, True)
+        r.platform = "spotify"
+        return r
+    if platform == Platform.YANDEX:
+        meta = await _yandex_meta(url)
+        if not meta.title:
+            raise RuntimeError("Не удалось извлечь метаданные Яндекс.Музыки. Пришли ссылку на SoundCloud или YouTube.")
+        q = f"ytsearch5:{meta.artist} {meta.title}" if meta.artist else f"ytsearch5:{meta.title} audio"
+        logger.info("Yandex query: %s", q)
+        r = await asyncio.to_thread(_sync_search_dl, q, meta, audio_format, True)
+        r.platform = "yandex"
+        return r
+    if platform in (Platform.SOUNDCLOUD, Platform.YOUTUBE):
+        r = await asyncio.to_thread(_sync_direct, url, audio_format, fast=True)
+        r.platform = platform.value
+        return r
+    raise RuntimeError(f"Платформа не поддерживается: {platform.value}")
+
 
 def cleanup(path):
     try:
@@ -589,166 +575,3 @@ def cleanup(path):
             Path(path).unlink()
     except Exception as e:
         logger.warning("cleanup failed: %s", e)
-
-# ============================================================
-# COBALT.TOOLS — fallback для YouTube (обход блокировки IP)
-# ============================================================
-
-def _cobalt_fetch(url: str, fmt: str = "mp3_320") -> DownloadResult:
-    """Скачивает аудио с YouTube через Cobalt API. Синхронный."""
-    import httpx
-    import tempfile
-
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": "MusicBot/1.0",
-    }
-    body = {
-        "url": url,
-        "downloadMode": "audio",
-        "audioFormat": "mp3",
-        "audioBitrate": "320" if fmt == "mp3_320" else "128",
-        "filenameStyle": "basic",
-    }
-
-    with httpx.Client(timeout=30) as client:
-        r = client.post("https://api.cobalt.tools/", json=body, headers=headers)
-        if r.status_code != 200:
-            raise RuntimeError(f"Cobalt HTTP {r.status_code}: {r.text[:200]}")
-        data = r.json()
-
-    status = data.get("status")
-    if status not in ("tunnel", "redirect"):
-        err = data.get("error", {})
-        code = err.get("code") if isinstance(err, dict) else str(err)
-        raise RuntimeError(f"Cobalt error: {code}")
-
-    audio_url = data.get("url")
-    if not audio_url:
-        raise RuntimeError("Cobalt: no url in response")
-
-    # Скачиваем аудио
-    filename = data.get("filename") or "audio.mp3"
-    safe_name = re.sub(r'[\\/*?:"<>|]', "_", filename)[:80]
-    out_path = DOWNLOAD_DIR / safe_name
-    if not out_path.suffix == ".mp3":
-        out_path = out_path.with_suffix(".mp3")
-
-    with httpx.Client(timeout=120, follow_redirects=True) as client:
-        with client.stream("GET", audio_url) as resp:
-            resp.raise_for_status()
-            with open(out_path, "wb") as f:
-                for chunk in resp.iter_bytes(chunk_size=65536):
-                    f.write(chunk)
-
-    title = data.get("filename") or out_path.stem
-    if title.endswith(".mp3"):
-        title = title[:-4]
-    # Пытаемся убрать "Artist - " префикс
-    performer = "Unknown"
-    if " - " in title:
-        parts = title.split(" - ", 1)
-        performer = parts[0].strip()
-        title = parts[1].strip()
-
-    return DownloadResult(
-        filepath=out_path,
-        title=title or "Unknown",
-        performer=performer,
-        duration=0,
-        platform="youtube-cobalt",
-    )
-
-# ============================================================
-# PIPED API — fallback для YouTube (без ключей)
-# ============================================================
-
-PIPED_INSTANCES = [
-    "https://pipedapi.kavin.rocks",
-    "https://pipedapi.adminforge.de",
-    "https://api.piped.private.coffee",
-    "https://pipedapi.drgns.space",
-]
-
-
-def _extract_yt_id(url: str) -> str:
-    import re as _re
-    m = _re.search(r"(?:v=|youtu\.be/|shorts/)([a-zA-Z0-9_-]{11})", url)
-    return m.group(1) if m else ""
-
-
-def _piped_fetch(url: str, fmt: str = "mp3_320") -> DownloadResult:
-    """Скачивает аудио с YouTube через Piped API."""
-    import httpx
-    import re as _re
-
-    video_id = _extract_yt_id(url)
-    if not video_id:
-        raise RuntimeError("Piped: не удалось извлечь video ID")
-
-    last_err = None
-    for instance in PIPED_INSTANCES:
-        try:
-            api_url = f"{instance}/streams/{video_id}"
-            with httpx.Client(timeout=20, headers={"User-Agent": "MusicBot/1.0"}) as client:
-                r = client.get(api_url)
-                if r.status_code != 200:
-                    last_err = f"HTTP {r.status_code}"
-                    continue
-                data = r.json()
-
-            audio_streams = data.get("audioStreams") or []
-            if not audio_streams:
-                last_err = "no audioStreams"
-                continue
-
-            # Сортировка по bitrate (лучшее качество)
-            def bitrate(s):
-                try:
-                    return int(s.get("bitrate") or 0)
-                except:
-                    return 0
-
-            audio_streams.sort(key=bitrate, reverse=True)
-            audio_url = audio_streams[0].get("url")
-            if not audio_url:
-                last_err = "no url"
-                continue
-
-            title = data.get("title") or "Unknown"
-            uploader = data.get("uploader") or "Unknown"
-
-            safe = _re.sub(r'[\\/*?:"<>|]', "_", f"{uploader} - {title}")[:80]
-            out_path = DOWNLOAD_DIR / f"{safe}.mp3"
-
-            with httpx.Client(timeout=120, follow_redirects=True) as client:
-                with client.stream("GET", audio_url) as resp:
-                    resp.raise_for_status()
-                    with open(out_path, "wb") as f:
-                        for chunk in resp.iter_bytes(chunk_size=65536):
-                            f.write(chunk)
-
-            # Теги
-            try:
-                a = MP3(str(out_path))
-                if a.tags is None:
-                    a.add_tags()
-                a.tags.add(TIT2(encoding=3, text=title))
-                a.tags.add(TPE1(encoding=3, text=uploader))
-                a.save()
-            except Exception:
-                pass
-
-            return DownloadResult(
-                filepath=out_path,
-                title=title,
-                performer=uploader,
-                duration=0,
-                platform="youtube-piped",
-            )
-        except Exception as e:
-            last_err = str(e)[:80]
-            continue
-
-    raise RuntimeError(f"Piped: все инстансы упали ({last_err})")

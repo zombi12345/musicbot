@@ -376,75 +376,33 @@ async def _get_free_proxies():
 _yandex_proxy_warmed = False
 
 async def _yandex_meta(url):
-    """Метаданные Яндекс.Музыки через официальную обертку (с прогревом прокси)."""
-    import re as _re
-    from yandex_music_open_api import Client
-
-    global _yandex_proxy_warmed
-
-    m = _re.search(r"/track/(\d+)", url)
-    if not m:
-        logger.warning("Yandex: track_id не найден")
-        return TrackMeta(source="yandex")
-    track_id = m.group(1)
-
-    token = os.getenv("YANDEX_TOKEN", "").strip()
-    if not token:
-        logger.warning("Yandex: нет токена")
+    """Метаданные Яндекс.Музыки из HTML (og-теги + JSON-LD)."""
+    html_text = await _fetch_html(url)
+    if not html_text:
+        logger.warning("Yandex: пустой HTML")
         return TrackMeta(source="yandex")
 
-    # ==== Прогрев прокси (только один раз за сессию) ====
-    if not _yandex_proxy_warmed:
-        logger.info("Yandex: прогрев официального прокси (может занять до 30 сек)...")
-        try:
-            # Пробный запрос к прокси, чтобы "разбудить" его
-            async with httpx.AsyncClient(timeout=30) as c:
-                # Этот запрос неважен, важен сам факт обращения
-                await c.get("https://yandex-music-cors-proxy.onrender.com/")
-            _yandex_proxy_warmed = True
-            logger.info("Yandex: прокси прогрет")
-        except Exception as e:
-            logger.warning(f"Yandex: прогрев не удался, пробуем напрямую: {e}")
+    # Сначала JSON-LD (если есть)
+    ld = _parse_json_ld(html_text)
+    if ld.title and ld.artist:
+        ld.source = "yandex"
+        logger.info("Yandex meta JSON-LD: artist=%r title=%r", ld.artist, ld.title)
+        return ld
 
-    # ==== Запрос метаданных ====
-    try:
-        client = Client(token=token)
-        # Библиотека сама использует прокси onrender.com
-        tracks = await asyncio.to_thread(client.tracks, [track_id])
-        if tracks:
-            t = tracks[0]
-            title = t.title or ""
-            artists = ", ".join(a.name for a in t.artists if a.name) if t.artists else ""
-            duration = int(t.duration_ms // 1000) if t.duration_ms else 0
-            logger.info(f"Yandex official proxy OK: artist={artists!r} title={title!r}")
-            return TrackMeta(title=title, artist=artists, duration=duration, source="yandex")
-    except Exception as e:
-        logger.warning(f"Yandex official proxy failed: {str(e)[:150]}")
+    # Fallback — og-теги
+    og = _parse_og(html_text)
+    if og.title:
+        if not ld.title:
+            ld.title = og.title
+        if not ld.artist:
+            ld.artist = og.artist
+        ld.source = "yandex"
+        logger.info("Yandex meta OG: artist=%r title=%r", ld.artist, ld.title)
+        return ld
 
-    # ==== Fallback: YtDLPProxy (уже есть в проекте) ====
-    logger.info("Yandex: пробуем YtDLPProxy как fallback...")
-    try:
-        from yt_dlp_proxy import YtDLPProxy
-        # YtDLPProxy умеет работать с разными сайтами, включая Яндекс.Музыку
-        output_tmpl = str(DOWNLOAD_DIR / "yandex_%(title).80s.%(ext)s")
-        cmd = [
-            url,
-            "--skip-download",
-            "--print", "%(title)s|%(artist)s|%(duration)s",
-            "--output", output_tmpl,
-        ]
-        result = YtDLPProxy.execute(cmd)
-        # YtDLPProxy.execute возвращает stdout
-        if result:
-            parts = result.strip().split("|")
-            if len(parts) >= 2:
-                title, artist = parts[0], parts[1]
-                duration = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
-                return TrackMeta(title=title, artist=artist, duration=duration, source="yandex")
-    except Exception as e:
-        logger.warning(f"YtDLPProxy failed for Yandex: {str(e)[:100]}")
-
+    logger.warning("Yandex: не нашёл метаданных в HTML")
     return TrackMeta(source="yandex")
+
 def _ydl_opts(fmt, fast: bool = False):
     """fast=True — для плейлистов: быстрее падать, меньше retries."""
     opts = {

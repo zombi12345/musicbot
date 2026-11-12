@@ -155,7 +155,7 @@ def _parse_og(html_text):
     m = re.search(r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']', html_text)
     if m:
         desc = m.group(1).strip()
-        for sep in [" · ", " — ", " – ", " - "]:
+        for sep in [" • ", " · ", " — ", " – ", " - ", " | "]:
             if sep in desc:
                 head = desc.split(sep, 1)[0].strip()
                 if head and len(head) < 100 and not head.lower().startswith("listen to"):

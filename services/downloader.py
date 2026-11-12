@@ -402,6 +402,7 @@ def _ydl_opts(fmt, fast: bool = False):
             "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
         },
         "geo_bypass": True,
+        "js_runtimes": ([f"deno:{DENO_PATH}"] if DENO_PATH else []),
         # Пробуем разные клиенты YouTube — уменьшает ConnectionResetError
         "extractor_args": {
             "youtube": {"player_client": ["web", "android", "ios"]},

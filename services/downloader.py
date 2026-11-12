@@ -9,6 +9,7 @@ from pathlib import Path
 
 import httpx
 import yt_dlp
+from yt_dlp_proxy import YTDLPProxy
 from dotenv import load_dotenv
 from mutagen.id3 import ID3, TIT2, TPE1
 from mutagen.mp3 import MP3
@@ -348,7 +349,7 @@ async def _spotify_meta(url):
 
 
 async def _yandex_meta(url):
-    """Метаданные Яндекс.Музыки через публичный CORS-прокси (обход 451)."""
+    """Метаданные Яндекс.Музыки через цепочку CORS-прокси (обход 451)."""
     import re as _re
 
     m = _re.search(r"/track/(\d+)", url)
@@ -357,36 +358,40 @@ async def _yandex_meta(url):
         return TrackMeta(source="yandex")
     track_id = m.group(1)
 
-    proxy_base = "https://yandex-music-cors-proxy.onrender.com/https://api.music.yandex.net:443"
-    api_url = f"{proxy_base}/tracks/{track_id}"
+    # Список прокси (Render -> Heroku -> Corsproxy -> AllOrigins)
+    proxies = [
+        f"https://yandex-music-cors-proxy.onrender.com/https://api.music.yandex.net:443/tracks/{track_id}",
+        f"https://yandex-music-cors-proxy.herokuapp.com/https://api.music.yandex.net:443/tracks/{track_id}",
+        f"https://corsproxy.io/?https://api.music.yandex.net/tracks/{track_id}",
+        f"https://api.allorigins.win/raw?url=https://api.music.yandex.net/tracks/{track_id}",
+    ]
 
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    try:
-        async with httpx.AsyncClient(timeout=25, headers=headers, follow_redirects=True) as c:
-            r = await c.get(api_url)
-            if r.status_code != 200:
-                logger.warning(f"Yandex CORS proxy -> {r.status_code}")
-                return TrackMeta(source="yandex")
-            data = r.json()
-    except Exception as e:
-        logger.warning(f"Yandex CORS proxy failed: {str(e)[:100]}")
-        return TrackMeta(source="yandex")
 
-    try:
-        tracks = data.get("result") or []
-        if not tracks:
-            return TrackMeta(source="yandex")
-        t = tracks[0]
-        title = (t.get("title") or "").strip()
-        artists = t.get("artists") or []
-        artist = ", ".join(a.get("name", "") for a in artists if a.get("name"))
-        duration = int((t.get("durationMs") or 0) // 1000)
-        if title:
-            logger.info(f"Yandex CORS OK: artist={artist!r} title={title!r}")
-            return TrackMeta(title=title, artist=artist, duration=duration, source="yandex")
-    except Exception as e:
-        logger.warning(f"Yandex CORS parse failed: {str(e)[:100]}")
+    for proxy_url in proxies:
+        try:
+            async with httpx.AsyncClient(timeout=30, headers=headers, follow_redirects=True) as c:
+                r = await c.get(proxy_url)
+                if r.status_code != 200:
+                    logger.warning(f"Proxy {proxy_url.split('/')[2]} -> {r.status_code}")
+                    continue
+                data = r.json()
+            tracks = data.get("result") or []
+            if not tracks:
+                continue
+            t = tracks[0]
+            title = (t.get("title") or "").strip()
+            artists = t.get("artists") or []
+            artist = ", ".join(a.get("name", "") for a in artists if a.get("name"))
+            duration = int((t.get("durationMs") or 0) // 1000)
+            if title:
+                logger.info(f"Yandex CORS OK: artist={artist!r} title={title!r}")
+                return TrackMeta(title=title, artist=artist, duration=duration, source="yandex")
+        except Exception as e:
+            logger.warning(f"Proxy {proxy_url.split('/')[2]} failed: {str(e)[:80]}")
+            continue
 
+    logger.warning("Yandex: все прокси упали")
     return TrackMeta(source="yandex")
 def _ydl_opts(fmt, fast: bool = False):
     """fast=True — для плейлистов: быстрее падать, меньше retries."""
@@ -545,67 +550,56 @@ def _sync_search_dl(query, meta, fmt, strict, fast: bool = False):
 
 
 def _sync_direct(url, fmt, fast: bool = False):
+    """yt-dlp → yt-dlp-proxy (авто-подбор бесплатных прокси) для YouTube."""
     opts = _ydl_opts(fmt, fast=fast)
     opts["outtmpl"] = str(DOWNLOAD_DIR / "%(title).80s.%(ext)s")
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        if "entries" in info:
-            info = info["entries"][0]
-        fp = Path(ydl.prepare_filename(info)).with_suffix(".mp3")
-    title = info.get("title") or "Unknown"
-    performer = info.get("uploader") or info.get("artist") or "Unknown"
-    dur = int(info.get("duration") or 0)
+
     try:
-        a = MP3(str(fp))
-        if a.tags is None:
-            a.add_tags()
-        a.tags.add(TIT2(encoding=3, text=title))
-        a.tags.add(TPE1(encoding=3, text=performer))
-        a.save()
-    except Exception as e:
-        logger.warning("Tags failed: %s", e)
-    return DownloadResult(filepath=fp, title=title, performer=performer, duration=dur)
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if "entries" in info:
+                info = info["entries"][0]
+            fp = Path(ydl.prepare_filename(info)).with_suffix(".mp3")
 
+        title = info.get("title") or "Unknown"
+        performer = info.get("uploader") or info.get("artist") or "Unknown"
+        duration = int(info.get("duration") or 0)
 
-async def download_audio(url, audio_format="mp3_320"):
-    platform = detect_platform(url)
-    if platform == Platform.SPOTIFY:
-        meta = await _spotify_meta(url)
-        if not meta.title:
-            raise RuntimeError("Не удалось извлечь метаданные Spotify")
-        q = f"ytsearch5:{meta.artist} {meta.title}" if meta.artist else f"ytsearch5:{meta.title} audio"
-        logger.info("Spotify query: %s", q)
-        r = await asyncio.to_thread(_sync_search_dl, q, meta, audio_format, True)
-        r.platform = "spotify"
-        return r
-    if platform == Platform.YANDEX:
-        meta = await _yandex_meta(url)
-        if not meta.title:
-            raise RuntimeError("Не удалось извлечь метаданные Яндекс.Музыки. Пришли ссылку на SoundCloud или YouTube.")
-        q = f"ytsearch5:{meta.artist} {meta.title}" if meta.artist else f"ytsearch5:{meta.title} audio"
-        logger.info("Yandex query: %s", q)
-        r = await asyncio.to_thread(_sync_search_dl, q, meta, audio_format, True)
-        r.platform = "yandex"
-        return r
-    if platform in (Platform.SOUNDCLOUD, Platform.YOUTUBE):
         try:
-            r = await asyncio.to_thread(_sync_direct, url, audio_format, fast=True)
-        except Exception as _e:
-            _es = str(_e).lower()
-            if any(x in _es for x in ("sign in", "failed to extract", "player response", "not a bot")):
-                raise RuntimeError(
-                    "⚠ YouTube блокирует наш сервер, поэтому эту ссылку скачать не могу.\n\n"
-                    "💡 Что делать:\n"
-                    "• Пришли этот же трек со SoundCloud — качаем без проблем\n"
-                    "• Spotify-ссылки работают (через SoundCloud)\n"
-                    "• YouTube-ссылки временно недоступны с этого сервера"
-                )
-            raise
-        r.platform = platform.value
-        return r
-    raise RuntimeError(f"Платформа не поддерживается: {platform.value}")
+            a = MP3(str(fp))
+            if a.tags is None:
+                a.add_tags()
+            a.tags.add(TIT2(encoding=3, text=title))
+            a.tags.add(TPE1(encoding=3, text=performer))
+            a.save()
+        except Exception as e:
+            logger.warning("Tags failed: %s", e)
 
-
+        return DownloadResult(filepath=fp, title=title, performer=performer, duration=duration)
+    except Exception as e:
+        err_str = str(e)
+        is_youtube = "youtube" in url.lower() or "youtu.be" in url.lower()
+        is_blocked = ("Sign in" in err_str or "Failed to extract" in err_str
+                      or "not a bot" in err_str or "player response" in err_str)
+        if is_youtube and is_blocked:
+            logger.warning("YouTube blocked, trying yt-dlp-proxy: %s", err_str[:80])
+            try:
+                proxy_downloader = YTDLPProxy()
+                proxy_downloader.download(url, output_dir=str(DOWNLOAD_DIR))
+                # После скачивания через прокси, файл может называться иначе
+                # Ищем самый свежий mp3
+                import os
+                files = sorted(DOWNLOAD_DIR.glob("*.mp3"), key=os.path.getmtime, reverse=True)
+                if not files:
+                    raise RuntimeError("yt-dlp-proxy не создал файл")
+                fp = files[0]
+                title = fp.stem
+                performer = "Unknown"
+                return DownloadResult(filepath=fp, title=title, performer=performer, duration=0)
+            except Exception as proxy_err:
+                logger.error("yt-dlp-proxy failed: %s", str(proxy_err)[:100])
+                raise RuntimeError("YouTube блокирует даже прокси. Пришли ссылку со SoundCloud.") from proxy_err
+        raise
 def cleanup(path):
     try:
         if path and Path(path).exists():

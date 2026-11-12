@@ -56,6 +56,15 @@ def _setup_cookies_from_env():
 
 COOKIES_FILE = os.getenv("YT_COOKIES_FILE", "").strip() or _setup_cookies_from_env()
 
+if COOKIES_FILE:
+    try:
+        size = os.path.getsize(COOKIES_FILE)
+        logger.info("COOKIES_FILE active: %s (%d bytes)", COOKIES_FILE, size)
+    except Exception as e:
+        logger.warning("COOKIES_FILE set but unreadable: %s", e)
+else:
+    logger.warning("COOKIES_FILE not set — YouTube will likely fail")
+
 FFMPEG_LOCATION = _resolve_ffmpeg()
 
 # ==== Deno (JS-runtime для YouTube челленджей) ====

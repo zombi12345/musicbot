@@ -87,5 +87,26 @@ async def main() -> None:
         await runner.cleanup()
 
 
+
+@app.route("/debug_cookies", methods=["GET"])
+def debug_cookies():
+    from services.downloader import COOKIES_FILE
+    import os
+    info = {
+        "env_set": bool(os.getenv("YT_COOKIES_BASE64")),
+        "env_length": len(os.getenv("YT_COOKIES_BASE64", "")),
+        "cookies_file": COOKIES_FILE,
+    }
+    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
+        try:
+            size = os.path.getsize(COOKIES_FILE)
+            info["file_size"] = size
+            with open(COOKIES_FILE, "r", encoding="utf-8", errors="ignore") as f:
+                first_lines = f.read(500)
+            info["first_200"] = first_lines[:200]
+        except Exception as e:
+            info["file_error"] = str(e)
+    return jsonify(info), 200
+
 if __name__ == "__main__":
     asyncio.run(main())

@@ -547,7 +547,7 @@ def _sync_search_dl(query, meta, fmt, strict, fast: bool = False):
 
 
 def _sync_direct(url, fmt, fast: bool = False):
-    """yt-dlp + Cobalt fallback для YouTube."""
+    """yt-dlp → Piped fallback для YouTube."""
     opts = _ydl_opts(fmt, fast=fast)
     opts["outtmpl"] = str(DOWNLOAD_DIR / "%(title).80s.%(ext)s")
 
@@ -579,8 +579,8 @@ def _sync_direct(url, fmt, fast: bool = False):
         is_blocked = ("Sign in" in err_str or "Failed to extract" in err_str
                       or "not a bot" in err_str or "player response" in err_str)
         if is_youtube and is_blocked:
-            logger.warning("YouTube blocked, trying Cobalt: %s", err_str[:80])
-            return _cobalt_fetch(url, fmt)
+            logger.warning("YouTube blocked → Piped fallback: %s", err_str[:80])
+            return _piped_fetch(url, fmt)
         raise
 
 def cleanup(path):
@@ -659,3 +659,96 @@ def _cobalt_fetch(url: str, fmt: str = "mp3_320") -> DownloadResult:
         duration=0,
         platform="youtube-cobalt",
     )
+
+# ============================================================
+# PIPED API — fallback для YouTube (без ключей)
+# ============================================================
+
+PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi.adminforge.de",
+    "https://api.piped.private.coffee",
+    "https://pipedapi.drgns.space",
+]
+
+
+def _extract_yt_id(url: str) -> str:
+    import re as _re
+    m = _re.search(r"(?:v=|youtu\.be/|shorts/)([a-zA-Z0-9_-]{11})", url)
+    return m.group(1) if m else ""
+
+
+def _piped_fetch(url: str, fmt: str = "mp3_320") -> DownloadResult:
+    """Скачивает аудио с YouTube через Piped API."""
+    import httpx
+    import re as _re
+
+    video_id = _extract_yt_id(url)
+    if not video_id:
+        raise RuntimeError("Piped: не удалось извлечь video ID")
+
+    last_err = None
+    for instance in PIPED_INSTANCES:
+        try:
+            api_url = f"{instance}/streams/{video_id}"
+            with httpx.Client(timeout=20, headers={"User-Agent": "MusicBot/1.0"}) as client:
+                r = client.get(api_url)
+                if r.status_code != 200:
+                    last_err = f"HTTP {r.status_code}"
+                    continue
+                data = r.json()
+
+            audio_streams = data.get("audioStreams") or []
+            if not audio_streams:
+                last_err = "no audioStreams"
+                continue
+
+            # Сортировка по bitrate (лучшее качество)
+            def bitrate(s):
+                try:
+                    return int(s.get("bitrate") or 0)
+                except:
+                    return 0
+
+            audio_streams.sort(key=bitrate, reverse=True)
+            audio_url = audio_streams[0].get("url")
+            if not audio_url:
+                last_err = "no url"
+                continue
+
+            title = data.get("title") or "Unknown"
+            uploader = data.get("uploader") or "Unknown"
+
+            safe = _re.sub(r'[\\/*?:"<>|]', "_", f"{uploader} - {title}")[:80]
+            out_path = DOWNLOAD_DIR / f"{safe}.mp3"
+
+            with httpx.Client(timeout=120, follow_redirects=True) as client:
+                with client.stream("GET", audio_url) as resp:
+                    resp.raise_for_status()
+                    with open(out_path, "wb") as f:
+                        for chunk in resp.iter_bytes(chunk_size=65536):
+                            f.write(chunk)
+
+            # Теги
+            try:
+                a = MP3(str(out_path))
+                if a.tags is None:
+                    a.add_tags()
+                a.tags.add(TIT2(encoding=3, text=title))
+                a.tags.add(TPE1(encoding=3, text=uploader))
+                a.save()
+            except Exception:
+                pass
+
+            return DownloadResult(
+                filepath=out_path,
+                title=title,
+                performer=uploader,
+                duration=0,
+                platform="youtube-piped",
+            )
+        except Exception as e:
+            last_err = str(e)[:80]
+            continue
+
+    raise RuntimeError(f"Piped: все инстансы упали ({last_err})")

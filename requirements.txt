@@ -4,7 +4,7 @@ Flask==3.0.3
 gunicorn==22.0.0
 httpx==0.27.0
 python-dotenv==1.0.1
-yt-dlp>=2025.1.1
+yt-dlp
 mutagen>=1.47.0
 shazamio>=0.4.2
 reportlab>=4.0.0

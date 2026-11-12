@@ -57,6 +57,23 @@ def _setup_cookies_from_env():
 COOKIES_FILE = os.getenv("YT_COOKIES_FILE", "").strip() or _setup_cookies_from_env()
 
 FFMPEG_LOCATION = _resolve_ffmpeg()
+
+# ==== Deno (JS-runtime для YouTube челленджей) ====
+def _resolve_deno() -> str | None:
+    env = os.getenv("DENO_PATH", "").strip()
+    if env and os.path.exists(env):
+        return env
+    # Рядом с проектом (Render: build скачивает сюда)
+    proj = Path(__file__).resolve().parent.parent
+    for name in ("deno", "deno.exe"):
+        p = proj / name
+        if p.exists():
+            return str(p)
+    # В PATH
+    import shutil
+    return shutil.which("deno")
+
+DENO_PATH = _resolve_deno()
 SPOTIFY_OEMBED = "https://open.spotify.com/oembed"
 SPOTIFY_EMBED = "https://open.spotify.com/embed/track/{id}"
 ITUNES_SEARCH = "https://itunes.apple.com/search"

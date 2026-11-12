@@ -348,49 +348,50 @@ async def _spotify_meta(url):
 
 
 async def _yandex_meta(url):
-    """Метаданные Яндекс.Музыки: yt-dlp → JSON-LD → og:title."""
-    import yt_dlp
-    loop = asyncio.get_event_loop()
+    """Метаданные Яндекс.Музыки: public API (работает с любого IP)."""
+    import re as _re
 
-    def _extract():
-        opts = {
-            "quiet": True, "no_warnings": True, "no_color": True, "skip_download": True,
-        }
-        if FFMPEG_LOCATION:
-            opts["ffmpeg_location"] = FFMPEG_LOCATION
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            if not info:
-                raise RuntimeError("yt-dlp: empty info")
-            title = info.get("title") or ""
-            artist = info.get("artist") or info.get("uploader") or ""
-            if artist.endswith(" - Topic"):
-                artist = artist[:-8]
-            if not info.get("artist") and " - " in title:
-                parts = title.split(" - ", 1)
-                artist = parts[0].strip()
-                title = parts[1].strip()
-            duration = int(info.get("duration") or 0)
-            return TrackMeta(title=title, artist=artist, duration=duration, source="yandex")
+    # Извлекаем track_id из URL: /album/.../track/XXXXX или /track/XXXXX
+    m = _re.search(r"/track/(\d+)", url)
+    if not m:
+        # Пробуем альбом? Но это трек — не должно случиться
+        logger.warning("Yandex: не нашёл track_id в URL: %s", url)
+        return TrackMeta(source="yandex")
+
+    track_id = m.group(1)
+    api_url = f"https://api.music.yandex.net/tracks/{track_id}"
+    headers = {
+        "User-Agent": "Yandex-Music-API",
+        "X-Yandex-Music-Client": "YandexMusicAndroid/24023621",
+    }
 
     try:
-        meta = await loop.run_in_executor(None, _extract)
-        logger.info("Yandex meta via yt-dlp: artist=%r title=%r dur=%d", meta.artist, meta.title, meta.duration)
-        return meta
+        async with httpx.AsyncClient(timeout=20, headers=headers) as c:
+            r = await c.get(api_url)
+            if r.status_code != 200:
+                logger.warning("Yandex API %s → HTTP %s", track_id, r.status_code)
+                return TrackMeta(source="yandex")
+            data = r.json()
     except Exception as e:
-        logger.warning("yt-dlp yandex failed: %s — fallback HTML", str(e)[:120])
-        html_text = await _fetch_html(url)
-        if not html_text:
+        logger.warning("Yandex API failed: %s", str(e)[:100])
+        return TrackMeta(source="yandex")
+
+    try:
+        tracks = (data.get("result") or [])
+        if not tracks:
             return TrackMeta(source="yandex")
-        ld = _parse_json_ld(html_text)
-        if not (ld.title and ld.artist):
-            og = _parse_og(html_text)
-            if not ld.title:
-                ld.title = og.title
-            if not ld.artist:
-                ld.artist = og.artist
-        ld.source = "yandex"
-        return ld
+        t = tracks[0]
+        title = (t.get("title") or "").strip()
+        artists = t.get("artists") or []
+        artist = ", ".join(a.get("name", "") for a in artists if a.get("name"))
+        duration = int((t.get("durationMs") or 0) // 1000)
+        if not title:
+            return TrackMeta(source="yandex")
+        logger.info("Yandex API OK: artist=%r title=%r dur=%d", artist, title, duration)
+        return TrackMeta(title=title, artist=artist, duration=duration, source="yandex")
+    except Exception as e:
+        logger.warning("Yandex API parse failed: %s", str(e)[:100])
+        return TrackMeta(source="yandex")
 
 
 # ============================================================

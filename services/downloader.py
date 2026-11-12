@@ -405,7 +405,7 @@ def _ydl_opts(fmt, fast: bool = False):
         "js_runtimes": ({"deno": {"path": DENO_PATH}} if DENO_PATH else {}),
         # Пробуем разные клиенты YouTube — уменьшает ConnectionResetError
         "extractor_args": {
-            "youtube": {"player_client": ["web", "android", "ios"]},
+            "youtube": {"player_client": ["tv", "web"]},
         },
     }
     if FFMPEG_LOCATION:

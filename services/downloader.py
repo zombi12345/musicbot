@@ -348,60 +348,46 @@ async def _spotify_meta(url):
 
 
 async def _yandex_meta(url):
-    """Метаданные Яндекс.Музыки: официальная библиотека с токеном → HTML fallback."""
+    """Метаданные Яндекс.Музыки через публичный CORS-прокси (обход 451)."""
     import re as _re
-    from yandex_music import Client
 
-    token = os.getenv("YANDEX_TOKEN", "").strip()
-
-    # Извлекаем track_id из URL
     m = _re.search(r"/track/(\d+)", url)
     if not m:
-        logger.warning("Yandex: не нашёл track_id в URL")
+        logger.warning("Yandex: track_id не найден")
         return TrackMeta(source="yandex")
-
     track_id = m.group(1)
 
-    # ==== Попытка 1: API с токеном ====
-    if token:
-        try:
-            loop = asyncio.get_event_loop()
+    proxy_base = "https://yandex-music-cors-proxy.onrender.com/https://api.music.yandex.net:443"
+    api_url = f"{proxy_base}/tracks/{track_id}"
 
-            def _fetch():
-                client = Client(token).init()
-                tracks = client.tracks([track_id])
-                if not tracks:
-                    return None
-                t = tracks[0]
-                title = t.title or ""
-                artists = ", ".join(a.name for a in t.artists if a.name) if t.artists else ""
-                duration = int(t.duration_ms // 1000) if t.duration_ms else 0
-                return TrackMeta(title=title, artist=artists, duration=duration, source="yandex")
-
-            meta = await loop.run_in_executor(None, _fetch)
-            if meta and meta.title:
-                logger.info("Yandex API OK: artist=%r title=%r dur=%d", meta.artist, meta.title, meta.duration)
-                return meta
-        except Exception as e:
-            logger.warning("Yandex token API failed: %s", str(e)[:150])
-
-    # ==== Попытка 2: HTML og-теги ====
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
-        html_text = await _fetch_html(url)
-        if html_text:
-            og = _parse_og(html_text)
-            if og.title:
-                logger.info("Yandex OG: artist=%r title=%r", og.artist, og.title)
-                return TrackMeta(title=og.title, artist=og.artist, source="yandex")
-            ld = _parse_json_ld(html_text)
-            if ld.title:
-                return TrackMeta(title=ld.title, artist=ld.artist, source="yandex")
+        async with httpx.AsyncClient(timeout=25, headers=headers, follow_redirects=True) as c:
+            r = await c.get(api_url)
+            if r.status_code != 200:
+                logger.warning(f"Yandex CORS proxy -> {r.status_code}")
+                return TrackMeta(source="yandex")
+            data = r.json()
     except Exception as e:
-        logger.warning("Yandex HTML fallback failed: %s", str(e)[:100])
+        logger.warning(f"Yandex CORS proxy failed: {str(e)[:100]}")
+        return TrackMeta(source="yandex")
 
-    logger.warning("Yandex: ни API, ни HTML не дали метаданных")
+    try:
+        tracks = data.get("result") or []
+        if not tracks:
+            return TrackMeta(source="yandex")
+        t = tracks[0]
+        title = (t.get("title") or "").strip()
+        artists = t.get("artists") or []
+        artist = ", ".join(a.get("name", "") for a in artists if a.get("name"))
+        duration = int((t.get("durationMs") or 0) // 1000)
+        if title:
+            logger.info(f"Yandex CORS OK: artist={artist!r} title={title!r}")
+            return TrackMeta(title=title, artist=artist, duration=duration, source="yandex")
+    except Exception as e:
+        logger.warning(f"Yandex CORS parse failed: {str(e)[:100]}")
+
     return TrackMeta(source="yandex")
-
 def _ydl_opts(fmt, fast: bool = False):
     """fast=True — для плейлистов: быстрее падать, меньше retries."""
     opts = {
@@ -421,9 +407,12 @@ def _ydl_opts(fmt, fast: bool = False):
             "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
         },
         "geo_bypass": True,
+            "force_ipv4": True,
         # Пробуем разные клиенты YouTube — уменьшает ConnectionResetError
         "extractor_args": {
             "youtube": {"player_client": ["tv", "mweb"]},
+            "youtube:player_client": "tv,web_embedded",
+            "youtube:player_skip": "webpage",
         },
     }
     if FFMPEG_LOCATION:

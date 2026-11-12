@@ -55,6 +55,24 @@ async def version(request: web.Request) -> web.Response:
     })
 
 
+async def debug_cookies(request: web.Request) -> web.Response:
+    import os
+    from services.downloader import COOKIES_FILE
+    info = {
+        "env_set": bool(os.getenv("YT_COOKIES_BASE64")),
+        "env_length": len(os.getenv("YT_COOKIES_BASE64", "")),
+        "cookies_file": COOKIES_FILE,
+    }
+    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
+        try:
+            info["file_size"] = os.path.getsize(COOKIES_FILE)
+            with open(COOKIES_FILE, "r", encoding="utf-8", errors="ignore") as f:
+                info["first_200"] = f.read(200)
+        except Exception as e:
+            info["file_error"] = str(e)
+    return web.json_response(info)
+
+
 async def main() -> None:
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
@@ -72,6 +90,7 @@ async def main() -> None:
     # Health / version
     app.router.add_get("/health", health)
     app.router.add_get("/version", version)
+    app.router.add_get("/debug_cookies", debug_cookies)
 
     setup_application(app, dp, bot=bot)
 
@@ -87,26 +106,6 @@ async def main() -> None:
         await runner.cleanup()
 
 
-
-@app.route("/debug_cookies", methods=["GET"])
-def debug_cookies():
-    from services.downloader import COOKIES_FILE
-    import os
-    info = {
-        "env_set": bool(os.getenv("YT_COOKIES_BASE64")),
-        "env_length": len(os.getenv("YT_COOKIES_BASE64", "")),
-        "cookies_file": COOKIES_FILE,
-    }
-    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
-        try:
-            size = os.path.getsize(COOKIES_FILE)
-            info["file_size"] = size
-            with open(COOKIES_FILE, "r", encoding="utf-8", errors="ignore") as f:
-                first_lines = f.read(500)
-            info["first_200"] = first_lines[:200]
-        except Exception as e:
-            info["file_error"] = str(e)
-    return jsonify(info), 200
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -348,36 +348,59 @@ async def _spotify_meta(url):
 
 
 async def _yandex_meta(url):
-    """Метаданные Яндекс.Музыки через HTML og-теги (JSON-LD fallback)."""
-    html_text = await _fetch_html(url)
-    if not html_text:
-        logger.warning("Yandex: пустой HTML")
+    """Метаданные Яндекс.Музыки: официальная библиотека с токеном → HTML fallback."""
+    import re as _re
+    from yandex_music import Client
+
+    token = os.getenv("YANDEX_TOKEN", "").strip()
+
+    # Извлекаем track_id из URL
+    m = _re.search(r"/track/(\d+)", url)
+    if not m:
+        logger.warning("Yandex: не нашёл track_id в URL")
         return TrackMeta(source="yandex")
 
-    # Сначала JSON-LD (если есть)
-    ld = _parse_json_ld(html_text)
-    if ld.title and ld.artist:
-        ld.source = "yandex"
-        logger.info("Yandex meta JSON-LD: artist=%r title=%r", ld.artist, ld.title)
-        return ld
+    track_id = m.group(1)
 
-    # Fallback — og-теги
-    og = _parse_og(html_text)
-    if og.title:
-        if not ld.title:
-            ld.title = og.title
-        if not ld.artist:
-            ld.artist = og.artist
-        ld.source = "yandex"
-        logger.info("Yandex meta OG: artist=%r title=%r", ld.artist, ld.title)
-        return ld
+    # ==== Попытка 1: API с токеном ====
+    if token:
+        try:
+            loop = asyncio.get_event_loop()
 
-    logger.warning("Yandex: не нашёл метаданных в HTML")
+            def _fetch():
+                client = Client(token).init()
+                tracks = client.tracks([track_id])
+                if not tracks:
+                    return None
+                t = tracks[0]
+                title = t.title or ""
+                artists = ", ".join(a.name for a in t.artists if a.name) if t.artists else ""
+                duration = int(t.duration_ms // 1000) if t.duration_ms else 0
+                return TrackMeta(title=title, artist=artists, duration=duration, source="yandex")
+
+            meta = await loop.run_in_executor(None, _fetch)
+            if meta and meta.title:
+                logger.info("Yandex API OK: artist=%r title=%r dur=%d", meta.artist, meta.title, meta.duration)
+                return meta
+        except Exception as e:
+            logger.warning("Yandex token API failed: %s", str(e)[:150])
+
+    # ==== Попытка 2: HTML og-теги ====
+    try:
+        html_text = await _fetch_html(url)
+        if html_text:
+            og = _parse_og(html_text)
+            if og.title:
+                logger.info("Yandex OG: artist=%r title=%r", og.artist, og.title)
+                return TrackMeta(title=og.title, artist=og.artist, source="yandex")
+            ld = _parse_json_ld(html_text)
+            if ld.title:
+                return TrackMeta(title=ld.title, artist=ld.artist, source="yandex")
+    except Exception as e:
+        logger.warning("Yandex HTML fallback failed: %s", str(e)[:100])
+
+    logger.warning("Yandex: ни API, ни HTML не дали метаданных")
     return TrackMeta(source="yandex")
-
-# ============================================================
-# yt-dlp
-# ============================================================
 
 def _ydl_opts(fmt, fast: bool = False):
     """fast=True — для плейлистов: быстрее падать, меньше retries."""

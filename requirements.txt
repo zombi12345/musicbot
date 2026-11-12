@@ -11,3 +11,4 @@ reportlab>=4.0.0
 imageio-ffmpeg>=0.5.1
 aiohttp>=3.10,<3.11
 bgutil-ytdlp-pot-provider
+yandex-music>=3.2.2

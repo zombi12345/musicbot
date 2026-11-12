@@ -563,7 +563,19 @@ async def download_audio(url, audio_format="mp3_320"):
         r.platform = "yandex"
         return r
     if platform in (Platform.SOUNDCLOUD, Platform.YOUTUBE):
-        r = await asyncio.to_thread(_sync_direct, url, audio_format, fast=True)
+        try:
+            r = await asyncio.to_thread(_sync_direct, url, audio_format, fast=True)
+        except Exception as _e:
+            _es = str(_e).lower()
+            if any(x in _es for x in ("sign in", "failed to extract", "player response", "not a bot")):
+                raise RuntimeError(
+                    "⚠ YouTube блокирует наш сервер, поэтому эту ссылку скачать не могу.\n\n"
+                    "💡 Что делать:\n"
+                    "• Пришли этот же трек со SoundCloud — качаем без проблем\n"
+                    "• Spotify-ссылки работают (через SoundCloud)\n"
+                    "• YouTube-ссылки временно недоступны с этого сервера"
+                )
+            raise
         r.platform = platform.value
         return r
     raise RuntimeError(f"Платформа не поддерживается: {platform.value}")

@@ -530,6 +530,65 @@ def _sync_search_dl(query, meta, fmt, strict, fast: bool = False):
     return DownloadResult(filepath=fp, title=final_title, performer=final_artist, duration=int(dl.get("duration") or 0))
 
 
+
+def _sync_direct_cobalt(url, fmt, fast: bool = False):
+    """Скачивание через публичный Cobalt API (обходит блокировки YouTube)."""
+    import requests
+
+    # Публичный инстанс Cobalt. Если он умрёт, можно найти другой.
+    COBALT_API = "https://api.cobalt.tools/api/json"
+
+    payload = {
+        "url": url,
+        "isAudioOnly": True,
+        "audioFormat": "mp3",
+        "youtubeBetterAudio": True
+    }
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        logger.info(f"Cobalt: отправляю запрос для {url[:80]}...")
+        r = requests.post(COBALT_API, json=payload, headers=headers, timeout=30)
+        if r.status_code != 200:
+            raise RuntimeError(f"Cobalt API вернул {r.status_code}: {r.text[:200]}")
+
+        data = r.json()
+        download_url = data.get("url")
+        if not download_url:
+            status = data.get("status", "unknown")
+            text = data.get("text", "no details")
+            raise RuntimeError(f"Cobalt status={status}: {text}")
+
+        logger.info(f"Cobalt: получил прямую ссылку, скачиваю...")
+        file_r = requests.get(download_url, stream=True, timeout=120)
+        if file_r.status_code != 200:
+            raise RuntimeError(f"Cobalt download failed: {file_r.status_code}")
+
+        # Сохраняем во временный файл
+        import tempfile, os
+        tmp_path = Path(tempfile.gettempdir()) / f"cobalt_{os.urandom(4).hex()}.mp3"
+        with open(tmp_path, "wb") as f:
+            for chunk in file_r.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        # Перемещаем в DOWNLOAD_DIR с нормальным именем
+        final_path = DOWNLOAD_DIR / tmp_path.name
+        if final_path.exists():
+            final_path.unlink()
+        tmp_path.rename(final_path)
+
+        title = final_path.stem
+        performer = "Cobalt"
+        logger.info(f"Cobalt OK: {title}")
+        return DownloadResult(filepath=final_path, title=title, performer=performer, duration=0)
+
+    except Exception as e:
+        logger.warning(f"Cobalt failed: {str(e)[:150]}")
+        raise
+
 def _sync_direct_multi(url, fmt, fast: bool = False):
     """
     Мульти-fallback для прямых ссылок:
@@ -741,6 +800,14 @@ const yt = require('yt-innertube');
     except Exception as e:
         errors.append(f"[5] YtDLPProxy: {str(e)[:120]}")
         logger.warning("multi[5] failed: %s", str(e)[:120])
+
+    # ---- 6. Cobalt API (последний шанс) ----
+    try:
+        logger.info("multi[6] пробую Cobalt API...")
+        return _sync_direct_cobalt(url, fmt, fast)
+    except Exception as e:
+        errors.append(f"[6] Cobalt: {str(e)[:120]}")
+        logger.warning("multi[6] Cobalt failed: %s", str(e)[:120])
 
     # Все методы провалились
     msg = "YouTube заблокирован на всех бесплатных путях:\n" + "\n".join(errors)

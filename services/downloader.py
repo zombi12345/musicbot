@@ -396,7 +396,7 @@ def _ydl_opts(fmt, fast: bool = False):
             "force_ipv4": True,
         # Пробуем разные клиенты YouTube — уменьшает ConnectionResetError
         "extractor_args": {
-            "youtube": {"player_client": ["android_vr", "tv", "mweb"]},
+            "youtube": {"player_client": ["mweb", "tv", "web_safari"]},
             "youtube:player_client": "tv,web_embedded",
             "youtube:player_skip": "webpage",
         },

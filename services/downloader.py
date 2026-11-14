@@ -530,6 +530,228 @@ def _sync_search_dl(query, meta, fmt, strict, fast: bool = False):
     return DownloadResult(filepath=fp, title=final_title, performer=final_artist, duration=int(dl.get("duration") or 0))
 
 
+def _sync_direct_multi(url, fmt, fast: bool = False):
+    """
+    Мульти-fallback для прямых ссылок:
+    - SoundCloud → старый _sync_direct (SC-first уже работает)
+    - YouTube → цепочка: yt-dlp(mweb,tv,web_safari) → yt-dlp(android_vr) → yt-innertube → Piped API → YtDLPProxy
+    """
+    import subprocess, shutil, tempfile
+
+    is_soundcloud = "soundcloud.com" in url.lower() or "on.soundcloud.com" in url.lower()
+    if is_soundcloud:
+        logger.info("multi: SoundCloud → _sync_direct")
+        return _sync_direct(url, fmt, fast=fast)
+
+    is_youtube = "youtube.com" in url.lower() or "youtu.be" in url.lower()
+    if not is_youtube:
+        return _sync_direct(url, fmt, fast=fast)
+
+    logger.info("multi: YouTube → цепочка fallback")
+    errors = []
+
+    # ---- 1. yt-dlp: mweb, tv, web_safari ----
+    try:
+        opts = _ydl_opts(fmt, fast=fast)
+        opts["extractor_args"] = {
+            "youtube": {"player_client": ["mweb", "tv", "web_safari"]},
+            "youtube:player_client": "mweb,tv,web_safari",
+        }
+        opts["outtmpl"] = str(DOWNLOAD_DIR / "%(title).80s.%(ext)s")
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if "entries" in info:
+                info = info["entries"][0]
+            fp = Path(ydl.prepare_filename(info)).with_suffix(".mp3")
+        title = info.get("title") or "Unknown"
+        performer = info.get("uploader") or info.get("artist") or "Unknown"
+        duration = int(info.get("duration") or 0)
+        logger.info("multi[1] yt-dlp(mweb,tv,web_safari) OK: %s", title)
+        try:
+            a = MP3(str(fp))
+            if a.tags is None: a.add_tags()
+            a.tags.add(TIT2(encoding=3, text=title))
+            a.tags.add(TPE1(encoding=3, text=performer))
+            a.save()
+        except Exception: pass
+        return DownloadResult(filepath=fp, title=title, performer=performer, duration=duration)
+    except Exception as e:
+        errors.append(f"[1] yt-dlp(mweb,tv,web_safari): {str(e)[:120]}")
+        logger.warning("multi[1] failed: %s", str(e)[:120])
+
+    # ---- 2. yt-dlp: android_vr ----
+    try:
+        opts = _ydl_opts(fmt, fast=fast)
+        opts["extractor_args"] = {
+            "youtube": {"player_client": ["android_vr"]},
+            "youtube:player_client": "android_vr",
+        }
+        opts["outtmpl"] = str(DOWNLOAD_DIR / "%(title).80s.%(ext)s")
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if "entries" in info:
+                info = info["entries"][0]
+            fp = Path(ydl.prepare_filename(info)).with_suffix(".mp3")
+        title = info.get("title") or "Unknown"
+        performer = info.get("uploader") or info.get("artist") or "Unknown"
+        duration = int(info.get("duration") or 0)
+        logger.info("multi[2] yt-dlp(android_vr) OK: %s", title)
+        try:
+            a = MP3(str(fp))
+            if a.tags is None: a.add_tags()
+            a.tags.add(TIT2(encoding=3, text=title))
+            a.tags.add(TPE1(encoding=3, text=performer))
+            a.save()
+        except Exception: pass
+        return DownloadResult(filepath=fp, title=title, performer=performer, duration=duration)
+    except Exception as e:
+        errors.append(f"[2] yt-dlp(android_vr): {str(e)[:120]}")
+        logger.warning("multi[2] failed: %s", str(e)[:120])
+
+    # ---- 3. yt-innertube (Node.js) ----
+    try:
+        node = shutil.which("node")
+        if not node:
+            raise RuntimeError("node не найден")
+        # Проверяем, установлен ли yt-innertube глобально
+        check = subprocess.run([node, "-e", "require('yt-innertube')"], capture_output=True, text=True, timeout=10)
+        if check.returncode != 0:
+            raise RuntimeError("yt-innertube не установлен (npm i -g yt-innertube)")
+        # Извлекаем videoId
+        vid = None
+        for pat in [r"(?:v=|youtu\.be/|shorts/)([a-zA-Z0-9_-]{11})"]:
+            m = re.search(pat, url)
+            if m:
+                vid = m.group(1); break
+        if not vid:
+            raise RuntimeError("не удалось извлечь videoId")
+        # Скрипт Node.js
+        js = f"""
+const yt = require('yt-innertube');
+(async () => {{
+  try {{
+    const res = await yt.downloadYouTubeAudioReliable('{vid}', 0, null);
+    if (res && res.path) {{
+      console.log(JSON.stringify({{path: res.path}}));
+    }} else {{
+      console.log(JSON.stringify({{error: res ? res.errorKind : 'unknown'}}));
+    }}
+  }} catch (e) {{
+    console.log(JSON.stringify({{error: String(e)}}));
+  }}
+}})();
+"""
+        # Пишем во временный файл
+        tmpdir = Path(tempfile.gettempdir())
+        js_path = tmpdir / "yt_innertube_tmp.js"
+        js_path.write_text(js, encoding="utf-8")
+        r = subprocess.run([node, str(js_path)], capture_output=True, text=True, timeout=120)
+        js_path.unlink(missing_ok=True)
+        out = r.stdout.strip()
+        if not out:
+            raise RuntimeError(f"node stderr: {r.stderr[:100]}")
+        data = json.loads(out)
+        if data.get("error"):
+            raise RuntimeError(f"yt-innertube error: {data['error']}")
+        src = Path(data["path"])
+        if not src.exists():
+            raise RuntimeError(f"файл не найден: {src}")
+        # Конвертируем в mp3 через ffmpeg
+        dst = DOWNLOAD_DIR / (src.stem + ".mp3")
+        ff = FFMPEG_LOCATION or "ffmpeg"
+        subprocess.run([ff, "-y", "-i", str(src), "-vn", "-ar", "44100", "-ac", "2",
+                        "-b:a", "320k" if fmt == "mp3_320" else "192k", str(dst)],
+                       capture_output=True, timeout=120)
+        src.unlink(missing_ok=True)
+        if not dst.exists():
+            raise RuntimeError("ffmpeg не создал mp3")
+        title = dst.stem
+        performer = "YouTube (yt-innertube)"
+        logger.info("multi[3] yt-innertube OK: %s", title)
+        return DownloadResult(filepath=dst, title=title, performer=performer, duration=0)
+    except Exception as e:
+        errors.append(f"[3] yt-innertube: {str(e)[:120]}")
+        logger.warning("multi[3] failed: %s", str(e)[:120])
+
+    # ---- 4. Piped API ----
+    try:
+        vid = None
+        for pat in [r"(?:v=|youtu\.be/|shorts/)([a-zA-Z0-9_-]{11})"]:
+            m = re.search(pat, url)
+            if m:
+                vid = m.group(1); break
+        if not vid:
+            raise RuntimeError("не удалось извлечь videoId")
+        instances = [
+            "https://pipedapi.kavin.rocks",
+            "https://api.piped.private.coffee",
+            "https://pipedapi.adminforge.de",
+        ]
+        for base in instances:
+            try:
+                api_url = f"{base}/streams/{vid}"
+                r = httpx.get(api_url, timeout=15, headers={"User-Agent": UA})
+                if r.status_code != 200:
+                    continue
+                data = r.json()
+                # Ищем аудио-поток
+                audio_streams = [s for s in data.get("audioStreams", []) if s.get("url")]
+                if not audio_streams:
+                    continue
+                audio_streams.sort(key=lambda x: x.get("bitrate", 0), reverse=True)
+                stream_url = audio_streams[0]["url"]
+                # Скачиваем через yt-dlp (он умеет прямые ссылки) или httpx
+                # Проще через yt-dlp: передадим прямой URL
+                opts = _ydl_opts(fmt, fast=fast)
+                opts["outtmpl"] = str(DOWNLOAD_DIR / "%(title).80s.%(ext)s")
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(stream_url, download=True)
+                    if "entries" in info:
+                        info = info["entries"][0]
+                    fp = Path(ydl.prepare_filename(info)).with_suffix(".mp3")
+                title = data.get("title") or "Unknown"
+                performer = data.get("uploader") or "YouTube"
+                logger.info("multi[4] Piped OK: %s", title)
+                return DownloadResult(filepath=fp, title=title, performer=performer, duration=0)
+            except Exception:
+                continue
+        raise RuntimeError("все инстансы Piped не ответили")
+    except Exception as e:
+        errors.append(f"[4] Piped: {str(e)[:120]}")
+        logger.warning("multi[4] failed: %s", str(e)[:120])
+
+    # ---- 5. YtDLPProxy (последний шанс) ----
+    try:
+        output_tmpl = str(DOWNLOAD_DIR / "%(title).80s.%(ext)s")
+        cmd = [
+            url, "-f", "bestaudio/best", "--no-playlist",
+            "--extract-audio", "--audio-format", "mp3",
+            "--audio-quality", "320K" if fmt == "mp3_320" else "192K",
+            "--output", output_tmpl,
+        ]
+        if FFMPEG_LOCATION:
+            cmd.extend(["--ffmpeg-location", FFMPEG_LOCATION])
+        YtDLPProxy.execute(cmd)
+        files = sorted(DOWNLOAD_DIR.glob("*.mp3"), key=os.path.getmtime, reverse=True)
+        if not files:
+            raise RuntimeError("YtDLPProxy не создал файл")
+        fp = files[0]
+        logger.info("multi[5] YtDLPProxy OK: %s", fp.stem)
+        return DownloadResult(filepath=fp, title=fp.stem, performer="YouTube (proxy)", duration=0)
+    except Exception as e:
+        errors.append(f"[5] YtDLPProxy: {str(e)[:120]}")
+        logger.warning("multi[5] failed: %s", str(e)[:120])
+
+    # Все методы провалились
+    msg = "YouTube заблокирован на всех бесплатных путях:\n" + "\n".join(errors)
+    logger.error(msg)
+    raise RuntimeError(
+        "⚠ YouTube блокирует наш сервер, и ни один бесплатный метод не сработал.\n\n"
+        "💡 Пришли ссылку со SoundCloud — качаем без проблем.\n"
+        "• Spotify-ссылки работают (через SoundCloud/YouTube)\n"
+        "• YouTube временно недоступен с этого сервера"
+    )
+
 def _sync_direct(url, fmt, fast: bool = False):
     """yt-dlp → YtDLPProxy fallback для YouTube."""
     opts = _ydl_opts(fmt, fast=fast)

@@ -536,7 +536,7 @@ def _sync_direct_cobalt(url, fmt, fast: bool = False):
     import requests
 
     # Публичный инстанс Cobalt. Если он умрёт, можно найти другой.
-    COBALT_API = "https://api.cobalt.tools/api/json"
+    COBALT_API = "https://cobalt-api.lamps-dev.dev/"
 
     payload = {
         "url": url,

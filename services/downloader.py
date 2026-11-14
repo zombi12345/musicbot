@@ -397,8 +397,8 @@ def _ydl_opts(fmt, fast: bool = False):
         # Пробуем разные клиенты YouTube — уменьшает ConnectionResetError
         "extractor_args": {
             "youtube": {"player_client": ["mweb", "tv", "web_safari"]},
-            "youtube:player_client": "tv,web_embedded",
-            "youtube:player_skip": "webpage",
+            "youtubepot-bgutilhttp": {"base_url": "http://127.0.0.1:4416"},
+            "youtube:player_client": "mweb,tv,web_safari",
         },
     }
     if FFMPEG_LOCATION:
@@ -642,8 +642,9 @@ def _sync_direct_multi(url, fmt, fast: bool = False):
     try:
         opts = _ydl_opts(fmt, fast=fast)
         opts["extractor_args"] = {
-            "youtube": {"player_client": ["android_vr"]},
-            "youtube:player_client": "android_vr",
+            "youtube": {"player_client": ["mweb", "tv", "web_safari"]},
+            "youtubepot-bgutilhttp": {"base_url": "http://127.0.0.1:4416"},
+            "youtube:player_client": "mweb,tv,web_safari",
         }
         opts["outtmpl"] = str(DOWNLOAD_DIR / "%(title).80s.%(ext)s")
         with yt_dlp.YoutubeDL(opts) as ydl:
